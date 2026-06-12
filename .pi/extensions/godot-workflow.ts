@@ -40,6 +40,7 @@ enum Phase {
 interface WorkflowState {
 	phase: Phase;
 	gameType: string;
+	gameName: string;
 	scope: string;
 	features: string[];
 	planText: string;
@@ -50,6 +51,7 @@ interface WorkflowState {
 const DEFAULT_STATE: WorkflowState = {
 	phase: Phase.QUESTIONS,
 	gameType: "",
+	gameName: "",
 	scope: "",
 	features: [],
 	planText: "",
@@ -108,7 +110,7 @@ function updateStatus(ctx: ExtensionCommandContext, state: WorkflowState): void 
 	);
 	ctx.ui.setWidget("godot-workflow", [
 		ctx.ui.theme.fg("accent", `🎮 Godot Workflow — ${label}`),
-		ctx.ui.theme.fg("dim", `Type: ${state.gameType || "TBD"}  |  Scope: ${state.scope || "TBD"}`),
+		ctx.ui.theme.fg("dim", `Game: ${state.gameName || state.gameType || "TBD"}  |  Scope: ${state.scope || "TBD"}`),
 		ctx.ui.theme.fg("muted", state.features.length > 0 ? `Features: ${state.features.join(", ")}` : ""),
 	]);
 }
@@ -136,7 +138,7 @@ async function runWorkflow(
 				state = await handleReview(ctx, state);
 				break;
 			case Phase.SETUP:
-				state = await handleSetup(ctx, state);
+				state = await handleSetup(pi, ctx, state);
 				break;
 			case Phase.IMPLEMENT:
 				state = await handleImplement(pi, ctx, state);
@@ -167,6 +169,98 @@ async function runWorkflow(
 
 		persistState(pi, state);
 	}
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * Convert a string to kebab-case for use as a folder name.
+ * E.g., "Arcade Shooter" → "arcade-shooter"
+ */
+function toKebabCase(str: string): string {
+	return str
+		.toLowerCase()
+		.trim()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-|-$/g, "");
+}
+
+/**
+ * Copy the contents of the template folder into a new game folder.
+ * Asks user for the folder name if not already in state.
+ * Updates project.godot config/name in the destination.
+ *
+ * @returns The game folder name used, or null if cancelled/failed.
+ */
+async function copyTemplateToNewGame(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	state: WorkflowState,
+): Promise<string | null> {
+	// Derive a suggested folder name from gameType
+	const suggestedName = state.gameName || toKebabCase(state.gameType || "untitled");
+
+	// Ask user for the game folder name
+	const folderName = await ctx.ui.input(
+		"Folder name for the new game (kebab-case, e.g., 'my-arcade-shooter'):",
+		suggestedName,
+	);
+	if (folderName === undefined) return null;
+	if (!folderName.trim()) {
+		ctx.ui.notify("Game folder name cannot be empty. Cancelling setup.", "error");
+		return null;
+	}
+
+	const gameFolder = folderName.trim();
+	const src = `${ctx.cwd}/template`;
+	const dst = `${ctx.cwd}/${gameFolder}`;
+
+	// Check if destination already exists
+	const existsResult = await pi.exec("test", ["-d", dst], { cwd: ctx.cwd });
+	if (existsResult.code === 0) {
+		const overwrite = await ctx.ui.confirm(
+			`Folder "${gameFolder}" already exists. Overwrite template files?`,
+			"Only template files (icon, project.godot, .godot/) will be replaced. Your game scripts and scenes won't be affected.",
+		);
+		if (!overwrite) {
+			ctx.ui.notify("Skipping template copy; using existing folder.", "info");
+			return gameFolder;
+		}
+	}
+
+	ctx.ui.notify(`Copying template into "${gameFolder}/"...`, "info");
+
+	// Create destination directory if needed
+	await pi.exec("mkdir", ["-p", dst], { cwd: ctx.cwd });
+
+	// Copy all template files (including hidden/dotfiles like .editorconfig, .godot/)
+	const copyResult = await pi.exec("cp", ["-r", `${src}/.`, dst], {
+		cwd: ctx.cwd,
+		timeout: 30_000,
+	});
+
+	if (copyResult.code !== 0) {
+		ctx.ui.notify(`Failed to copy template: ${copyResult.stderr.slice(0, 200)}`, "error");
+		return null;
+	}
+
+	// Update project.godot config/name to match the game
+	const displayName = state.gameType
+		? state.gameType.charAt(0).toUpperCase() + state.gameType.slice(1)
+		: gameFolder.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+	const sedResult = await pi.exec(
+		"sed",
+		["-i", "", `s/config/name="Template"/config/name="${displayName}"/`, `${dst}/project.godot`],
+		{ cwd: ctx.cwd, timeout: 10_000 },
+	);
+
+	if (sedResult.code !== 0) {
+		ctx.ui.notify("Template copied but failed to update project name in project.godot.", "warning");
+	}
+
+	ctx.ui.notify(`✅ Template copied into "${gameFolder}/" as "${displayName}".`, "info");
+	return gameFolder;
 }
 
 // ── Phase handlers ───────────────────────────────────────────────────────────
@@ -232,21 +326,23 @@ async function handlePlan(
 		`**Scope:** ${state.scope}`,
 		`**Features:** ${state.features.join(", ")}`,
 		``,
-		`Read the project README and docs/ first. Then output a plan under a "Plan:" header:`,
+		`First, read the project README and docs/ to understand the project structure.`,
+		``,
+		`Then output a plan under a "Plan:" header like this (adjust steps as needed):`,
 		``,
 		`Plan:`,
-		`1. Analyze existing project structure and templates`,
-		`2. Copy relevant template`,
-		`3. Set up scenes and scripts for ${state.gameType}`,
+		`1. Analyze existing project structure and templates — understand how template/ is organized`,
+		`2. Copy template — the extension handles this automatically before implementation starts`,
+		`3. Set up main scene and core scripts for ${state.gameType}`,
 		`4. Implement core mechanics`,
 		`5. Add features: ${state.features.join(", ")}`,
-		`6. Validate with godot`,
+		`6. Validate with godot --headless --check-only`,
 		`7. Build for web`,
 		`8. Verify build`,
 		``,
 		`After completing each step during implementation, mark it with [DONE:n].`,
 		``,
-		`First, read the project README and docs/, then output your plan.`,
+		`Read the project README and docs/, then output your plan.`,
 	].join("\n");
 
 	ctx.ui.notify("Asking LLM to create a plan...", "info");
@@ -291,35 +387,35 @@ async function handleReview(
 }
 
 async function handleSetup(
+	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	state: WorkflowState,
 ): Promise<WorkflowState> {
-	ctx.ui.notify("Running template copy script...", "info");
+	ctx.ui.notify("Setting up new game folder from template...", "info");
 
-	// Check if there's a template script to run
-	const hasScript = await checkFileExists(ctx, "scripts/copy-template.sh");
+	const gameFolder = await copyTemplateToNewGame(pi, ctx, state);
 
-	if (hasScript) {
-		const result = await pi.exec("bash", ["scripts/copy-template.sh"], {
-			cwd: ctx.cwd,
-			timeout: 30_000,
-		});
+	if (gameFolder === null) {
+		const action = await ctx.ui.select("Template copy failed or cancelled. What now?", [
+			"Retry setup",
+			"Skip setup (use existing folder)",
+			"Stop workflow",
+		]);
 
-		if (result.code !== 0) {
-			ctx.ui.notify(`Template script failed (exit ${result.code}): ${result.stderr.slice(0, 200)}`, "error");
-			const retry = await ctx.ui.confirm("Template script failed. Retry?", "Check the output and try again");
-			if (!retry) {
-				const action = await ctx.ui.select("What next?", ["Skip setup step", "Stop workflow"]);
-				if (action === "Stop workflow") return { ...state, phase: Phase.DONE };
-			} else {
+		switch (action) {
+			case "Retry setup":
 				return state; // Loop back to SETUP
-			}
+			case "Skip setup (use existing folder)":
+				return { ...state, phase: Phase.IMPLEMENT };
+			default:
+				return { ...state, phase: Phase.DONE };
 		}
-		ctx.ui.notify("Template script completed successfully.", "info");
-	} else {
-		ctx.ui.notify("No template copy script found (scripts/copy-template.sh). Skipping.", "info");
 	}
 
+	// Store the game name in state for downstream phases
+	state = { ...state, gameName: gameFolder };
+
+	ctx.ui.notify(`✅ Setup complete. Game folder: "${gameFolder}/".`, "info");
 	return { ...state, phase: Phase.IMPLEMENT };
 }
 
@@ -337,6 +433,7 @@ async function handleImplement(
 		state.planText,
 		``,
 		`The project is at ${ctx.cwd}.`,
+		state.gameName ? `Work in the game folder: "${state.gameName}/" (already set up from template).` : ``,
 		`After making changes, tell me which steps you completed.`,
 	].join("\n");
 
@@ -537,13 +634,6 @@ async function handlePush(
 	return { ...state, phase: Phase.DONE };
 }
 
-// ── Helper ───────────────────────────────────────────────────────────────────
-
-async function checkFileExists(ctx: ExtensionCommandContext, path: string): Promise<boolean> {
-	const result = await pi.exec("test", ["-f", path], { cwd: ctx.cwd });
-	return result.code === 0;
-}
-
 // ── Extension entry point ────────────────────────────────────────────────────
 
 export default function godotWorkflowExtension(pi: ExtensionAPI): void {
@@ -603,7 +693,8 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 			const lines = [
 				ctx.ui.theme.fg("accent", "🎮 Godot Workflow State"),
 				ctx.ui.theme.fg("toolTitle", `  Phase:      ${state.phase}`),
-				ctx.ui.theme.fg("text", `  Game:       ${state.gameType}`),
+				ctx.ui.theme.fg("text", `  Game type:  ${state.gameType}`),
+				ctx.ui.theme.fg("text", `  Folder:     ${state.gameName || "(not yet set)"}`),
 				ctx.ui.theme.fg("text", `  Scope:      ${state.scope}`),
 				ctx.ui.theme.fg("muted", `  Features:   ${state.features.join(", ")}`),
 				ctx.ui.theme.fg("muted", `  Retries:    ${state.retryCount}/${state.maxRetries}`),
