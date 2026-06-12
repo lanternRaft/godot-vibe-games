@@ -1,0 +1,196 @@
+[gd_scene format=3 uid="uid://mainscene"]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1_2b26f"]
+[ext_resource type="Script" path="res://scripts/globals.gd" id="2_3k5xq"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel"]
+bg_color = Color(0.1, 0.1, 0.15, 0.9)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_gear"]
+bg_color = Color(0.2, 0.2, 0.3, 0.8)
+corner_radius_top_left = 6
+corner_radius_top_right = 6
+corner_radius_bottom_right = 6
+corner_radius_bottom_left = 6
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_main"]
+radius = 16.0
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_fs"]
+bg_color = Color(0.1, 0.1, 0.15, 0.6)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_2b26f")
+
+[node name="UI" type="CanvasLayer" parent="."]
+layer = 10
+
+[node name="GearButton" type="Button" parent="UI"]
+layout_mode = 1
+anchors_preset = 2
+anchor_left = 1.0
+anchor_top = 0.0
+anchor_right = 1.0
+anchor_bottom = 0.0
+offset_left = -44.0
+offset_top = 4.0
+offset_right = -4.0
+offset_bottom = 44.0
+theme_override_font_sizes/font_size = 24
+theme_override_styles/normal = SubResource("StyleBoxFlat_gear")
+text = "⚙"
+
+[node name="FullscreenButton" type="Button" parent="UI"]
+layout_mode = 1
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -48.0
+offset_top = -48.0
+offset_right = -8.0
+offset_bottom = -8.0
+theme_override_font_sizes/font_size = 20
+theme_override_styles/normal = SubResource("StyleBoxFlat_fs")
+text = "⛶"
+
+[node name="SettingsPanel" type="Panel" parent="UI"]
+visible = false
+layout_mode = 0
+offset_left = 8.0
+offset_top = 52.0
+offset_right = 240.0
+offset_bottom = 356.0
+theme_override_styles/panel = SubResource("StyleBoxFlat_panel")
+
+[node name="Title" type="Label" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 8.0
+offset_top = 8.0
+offset_right = 224.0
+offset_bottom = 32.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 18
+text = "Settings"
+horizontal_alignment = 1
+
+[node name="BouncinessLabel" type="Label" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 8.0
+offset_top = 36.0
+offset_right = 120.0
+offset_bottom = 56.0
+theme_override_colors/font_color = Color(0.8, 0.8, 0.9, 1)
+theme_override_font_sizes/font_size = 14
+text = "Bounciness"
+
+[node name="BouncinessValue" type="Label" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 180.0
+offset_top = 36.0
+offset_right = 224.0
+offset_bottom = 56.0
+theme_override_colors/font_color = Color(1, 1, 0, 1)
+theme_override_font_sizes/font_size = 14
+text = "0.8"
+horizontal_alignment = 2
+
+[node name="BouncinessSlider" type="HSlider" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 8.0
+offset_top = 56.0
+offset_right = 224.0
+offset_bottom = 76.0
+theme_override_colors/slider = Color(0.6, 0.6, 0.8, 1)
+tick_count = 0
+
+[node name="BallSizeLabel" type="Label" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 8.0
+offset_top = 84.0
+offset_right = 120.0
+offset_bottom = 104.0
+theme_override_colors/font_color = Color(0.8, 0.8, 0.9, 1)
+theme_override_font_sizes/font_size = 14
+text = "Ball Size"
+
+[node name="BallSizeValue" type="Label" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 180.0
+offset_top = 84.0
+offset_right = 224.0
+offset_bottom = 104.0
+theme_override_colors/font_color = Color(1, 1, 0, 1)
+theme_override_font_sizes/font_size = 14
+text = "16"
+horizontal_alignment = 2
+
+[node name="BallSizeSlider" type="HSlider" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 8.0
+offset_top = 104.0
+offset_right = 224.0
+offset_bottom = 124.0
+theme_override_colors/slider = Color(0.6, 0.6, 0.8, 1)
+tick_count = 0
+
+[node name="BallCountLabel" type="Label" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 8.0
+offset_top = 132.0
+offset_right = 224.0
+offset_bottom = 156.0
+theme_override_colors/font_color = Color(0.6, 0.8, 1, 1)
+theme_override_font_sizes/font_size = 14
+text = "Balls: 0 / 100"
+horizontal_alignment = 1
+
+[node name="GravityLabel" type="Label" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 8.0
+offset_top = 164.0
+offset_right = 120.0
+offset_bottom = 184.0
+theme_override_colors/font_color = Color(0.8, 0.8, 0.9, 1)
+theme_override_font_sizes/font_size = 14
+text = "Gravity"
+
+[node name="GravityValue" type="Label" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 180.0
+offset_top = 164.0
+offset_right = 224.0
+offset_bottom = 184.0
+theme_override_colors/font_color = Color(1, 1, 0, 1)
+theme_override_font_sizes/font_size = 14
+text = "1.0"
+horizontal_alignment = 2
+
+[node name="GravitySlider" type="HSlider" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 8.0
+offset_top = 184.0
+offset_right = 224.0
+offset_bottom = 204.0
+theme_override_colors/slider = Color(0.6, 0.6, 0.8, 1)
+tick_count = 0
+
+[node name="GravityDescription" type="Label" parent="UI/SettingsPanel"]
+layout_mode = 0
+offset_left = 8.0
+offset_top = 208.0
+offset_right = 224.0
+offset_bottom = 228.0
+theme_override_colors/font_color = Color(0.5, 0.5, 0.6, 1)
+theme_override_font_sizes/font_size = 11
+text = "0=zero G, 1=normal gravity"
+horizontal_alignment = 1
