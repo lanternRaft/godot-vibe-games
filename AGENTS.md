@@ -9,6 +9,9 @@ Expert Godot 4 developer. Write clean, strongly typed GDScript following officia
 - **Maximum 3 levels of nesting.** Use early returns and guard clauses.
 - **Prefer composition:** Child nodes with focused scripts over monolithic controllers.
 
+### Input Setup
+- Input actions are defined in the `[input]` section of `project.godot`. See `docs/INPUT_SETUP.md` for the full reference: action names, keycodes, formats, and how to consume input in GDScript.
+
 ### GDScript Rules
 - Always use explicit static types for variables and function returns.
 - Use `##` descriptions above:
