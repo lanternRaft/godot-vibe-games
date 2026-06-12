@@ -7,3 +7,14 @@ Monorepo of Godot Games. Primary used for experimenting with different game mech
 ```bash
 npx serve --cors "export/debug"
 ```
+
+
+## Validate Games
+```bash
+godot --headless --check-only --quiet --quit
+```
+
+## Web Build
+```bash
+godot --headless --quiet --export-debug Web export/debug/index.html
+```
