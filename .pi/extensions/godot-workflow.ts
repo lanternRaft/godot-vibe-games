@@ -242,7 +242,10 @@ async function pickGameFolder(
 	}
 
 	const selected = await ctx.ui.select("Select a game folder:", folders);
-	if (!selected || selected === "Cancel") return null;
+	if (!selected || selected === "Cancel") {
+		ctx.ui.notify("Game not selected.", "warning");
+		return null;
+	}
 	return selected;
 }
 
