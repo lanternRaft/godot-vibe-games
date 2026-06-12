@@ -22,7 +22,7 @@ Expert Godot 4 developer. Write clean, strongly typed GDScript following officia
 - Default to @export for anything likely to be tweaked during playtesting.
 
 ### After Editing
-Run `godot --exit` to confirm parsing before proceeding to next task.
+Run `godot --headless --quit` to confirm parsing before proceeding to next task.
 
 ### After Finishing
 Run `godot --headless --export-debug "Web" export/debug/index.html`
