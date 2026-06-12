@@ -185,7 +185,7 @@ async function detectGameFolders(
 ): Promise<string[]> {
 	const result = await pi.exec(
 		"bash",
-		["-c", `for d in */; do [ -f "${d}GAME_DESIGN.md" ] && echo "${d%/}"; done`],
+        ["-c", `for d in */; do [ -f "$d/GAME_DESIGN.md" ] && basename "$d"; done`],
 		{ cwd: ctx.cwd },
 	);
 	if (result.code !== 0) return [];
@@ -495,10 +495,7 @@ async function handleImplement(
 		`1. **Read** the GDD at \\\`${state.gameName}/GAME_DESIGN.md\\\` to understand the game design.`,
 		`2. **Create scenes and scripts** in \\\`${state.gameName}/\\\` to implement the game.`,
 		`3. **Follow the GDD exactly** — match the controls, mechanics, entities, and UI described there.`,
-		`4. **Run** \\\`godot --headless --check-only --quit --quiet\\\` to validate your changes after implementing.`,
-		`5. **Tell me** what you implemented and if validation passed.`,
 		``,
-		`Use the template project structure as a starting point.`,
 	].join("\n");
 
 	ctx.ui.notify("Asking LLM to implement the game from the GDD...", "info");
