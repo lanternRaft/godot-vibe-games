@@ -651,7 +651,7 @@ async function handleCommit(
 		timeout: 10_000,
 	});
 	if (commitResult.code !== 0) {
-		ctx.ui.notify(`git commit failed: ${commitResult.stderr.slice(0, 200)}`, "error`);
+		ctx.ui.notify(`git commit failed: ${commitResult.stderr.slice(0, 200)}`, "error");
 		const skip = await ctx.ui.confirm("Commit failed. Skip commit and push?", "");
 		if (skip) return { ...state, phase: Phase.PUSH };
 		return state;

@@ -10,8 +10,6 @@
 * **Visual Style:** `[e.g., Retro 8-bit, Minimalist shapes, Flat neon colors]`
 * **Audio Style:** `[e.g., Retro arcade sound effects, Chiptune music background]`
 
----
-
 ## Core Game Loop & Flow
 *How the game operates from the moment it is opened to when the player quits.*
 
@@ -22,8 +20,6 @@
 4. **Game Over Screen:** Displays the final score, compares it to the high score, and offers a "Restart" option.
 
 ### The Gameplay Loop
----
-
 ## Controls & Input Mapping
 *How the player interacts with the game.*
 
@@ -33,8 +29,6 @@
 | `[e.g., Arrow Right / D]`| Navigate Right | Move character right |
 | `[e.g., Spacebar]` | Select Option | Action (Jump / Shoot) |
 | `[e.g., Escape / P]` | N/A | Pause / Unpause |
-
----
 
 ## Game Entities & Mechanics
 *The definitions, properties, and behaviors of everything that moves or interacts in the game.*
@@ -62,8 +56,6 @@
 * **Behavior:** `[e.g., Spawns rarely, floats in place or drifts slowly across the screen.]`
 * **Interaction:** `[e.g., Grants temporary invulnerability or adds 500 bonus points.]`
 
----
-
 ## User Interface (UI) & HUD
 *What information is displayed on the screen during play.*
 
@@ -72,8 +64,6 @@
     * **Health/Lives:** Displayed as icons or a health bar (top-right corner).
 * **Menus:**
     * Simple, clean text overlays for the Start, Pause, and Game Over states.
-
----
 
 ## Win / Loss & Difficulty Progression
 *How the game is won, lost, or gets harder over time.*
