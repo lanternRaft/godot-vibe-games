@@ -5,9 +5,10 @@
  * Orchestrates planning, implementation, validation, building, and deployment.
  *
  * Commands:
- *   /godot-generate    - Start the full workflow (questions → GDD → build → deploy)
- *   /godot-plan        - Planning phase only (questions + GDD creation/review)
- *   /godot-state       - Show current workflow state
+ *   /godot-generate         - Start the full workflow (questions → GDD → build → deploy)
+ *   /godot-plan             - Planning phase only (questions + GDD creation/review)
+ *   /godot-state            - Show current workflow state
+ *   /godot-implement-gdd    - Implement directly from existing GAME_DESIGN.md (skip planning)
  *
  * State Machine Phases:
  *   QUESTIONS  →  SETUP  →  PLAN (interactive GDD)  →  REVIEW  →  IMPLEMENT  →  VALIDATE  →  BUILD  →  VERIFY  →  COMMIT  →  PUSH  →  DONE
@@ -174,6 +175,22 @@ async function runWorkflow(
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * Detect game folders that contain a GAME_DESIGN.md file.
+ */
+async function detectGameFolders(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+): Promise<string[]> {
+	const result = await pi.exec(
+		"bash",
+		["-c", `for d in */; do [ -f "${d}GAME_DESIGN.md" ] && echo "${d%/}"; done`],
+		{ cwd: ctx.cwd },
+	);
+	if (result.code !== 0) return [];
+	return result.stdout.trim().split("\n").filter(Boolean);
+}
 
 /**
  * Convert a string to kebab-case for use as a folder name.
@@ -762,6 +779,77 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 				persistState(pi, state);
 				await runWorkflow(pi, ctx, state);
 			}
+		},
+	});
+
+	// ── /godot-implement-gdd: Implement directly from existing GDD ──
+	pi.registerCommand("godot-implement-gdd", {
+		description: "Implement a game directly from an existing GAME_DESIGN.md (skips questions/setup/plan/review)",
+		handler: async (args, ctx) => {
+			await ctx.waitForIdle();
+
+			// Resolve game folder: from argument or picker
+			let gameFolder = args[0]?.trim() || "";
+			if (!gameFolder) {
+				const folders = await detectGameFolders(pi, ctx);
+				if (folders.length === 0) {
+					ctx.ui.notify(
+						"No game folders with GAME_DESIGN.md found. Create one first, then run this command.",
+						"error",
+					);
+					return;
+				}
+				const selected = await ctx.ui.select(
+					"Select a game folder with GAME_DESIGN.md:",
+					folders,
+				);
+				if (!selected || selected === "Cancel") return;
+				gameFolder = selected;
+			}
+
+			const gddPath = `${ctx.cwd}/${gameFolder}/GAME_DESIGN.md`;
+
+			// Verify the GDD exists
+			const existsResult = await pi.exec("test", ["-f", gddPath], { cwd: ctx.cwd });
+			if (existsResult.code !== 0) {
+				ctx.ui.notify(
+					`${gameFolder}/GAME_DESIGN.md not found. Point this at a folder containing a completed GDD.`,
+					"error",
+				);
+				return;
+			}
+
+			// Read the GDD
+			const readResult = await pi.exec("cat", [gddPath], { cwd: ctx.cwd });
+			if (readResult.code !== 0) {
+				ctx.ui.notify(`Failed to read ${gameFolder}/GAME_DESIGN.md`, "error");
+				return;
+			}
+			const gddContent = readResult.stdout;
+
+			// Show preview and confirm
+			const preview = gddContent.split("\n").slice(0, 20).join("\n");
+			const ok = await ctx.ui.confirm(
+				`Implement from "${gameFolder}/GAME_DESIGN.md"?`,
+				`The full workflow (validate → build → commit → push) will run after implementation.\n\n--- Preview (first 20 lines) ---\n${preview}`,
+			);
+			if (!ok) return;
+
+			// Create a workflow state that jumps straight to IMPLEMENT
+			const state: WorkflowState = {
+				...DEFAULT_STATE,
+				phase: Phase.IMPLEMENT,
+				gameName: gameFolder,
+				gameType: gameFolder,
+				scope: "implemented from existing GDD",
+				features: [],
+				planText: gddContent,
+				retryCount: 0,
+				maxRetries: 3,
+			};
+
+			persistState(pi, state);
+			await runWorkflow(pi, ctx, state);
 		},
 	});
 
