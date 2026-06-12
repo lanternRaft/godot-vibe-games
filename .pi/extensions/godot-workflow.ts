@@ -5,16 +5,16 @@
  * Orchestrates planning, implementation, validation, building, and deployment.
  *
  * Commands:
- *   /godot-generate    - Start the full workflow (questions → plan → build → deploy)
- *   /godot-plan        - Planning phase only (questions + plan creation/review)
+ *   /godot-generate    - Start the full workflow (questions → GDD → build → deploy)
+ *   /godot-plan        - Planning phase only (questions + GDD creation/review)
  *   /godot-state       - Show current workflow state
  *
  * State Machine Phases:
- *   QUESTIONS  →  PLAN  →  REVIEW  →  SETUP  →  IMPLEMENT  →  VALIDATE  →  BUILD  →  VERIFY  →  COMMIT  →  PUSH  →  DONE
- *                                                                             │
- *                                (VERIFY fails) ◄─────────────────────────────┘
- *                                                                             │
- *                                (REVIEW refines) ◄───────────────────────────┘
+ *   QUESTIONS  →  SETUP  →  PLAN (interactive GDD)  →  REVIEW  →  IMPLEMENT  →  VALIDATE  →  BUILD  →  VERIFY  →  COMMIT  →  PUSH  →  DONE
+ *                                                                                │
+ *                                (VERIFY fails) ◄────────────────────────────────┘
+ *                                                                                │
+ *                                (REVIEW refines GDD) ◄──────────────────────────┘
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -24,9 +24,9 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, SessionEn
 /** Phases of the godot generation workflow */
 enum Phase {
 	QUESTIONS = "questions",
+	SETUP = "setup",
 	PLAN = "plan",
 	REVIEW = "review",
-	SETUP = "setup",
 	IMPLEMENT = "implement",
 	VALIDATE = "validate",
 	BUILD = "build",
@@ -43,6 +43,8 @@ interface WorkflowState {
 	gameName: string;
 	scope: string;
 	features: string[];
+	/** During PLAN: "pending" if prompt sent but GDD not yet written.
+	 *  During REVIEW: contains the full GDD text for editing. */
 	planText: string;
 	retryCount: number;
 	maxRetries: number;
@@ -63,10 +65,10 @@ const DEFAULT_STATE: WorkflowState = {
 
 const PHASE_LABELS: Record<Phase, string> = {
 	[Phase.QUESTIONS]: "Ask clarifying questions",
-	[Phase.PLAN]: "Create plan",
-	[Phase.REVIEW]: "Review and refine plan",
-	[Phase.SETUP]: "Copy template script",
-	[Phase.IMPLEMENT]: "Make changes from plan",
+	[Phase.SETUP]: "Copy template to game folder",
+	[Phase.PLAN]: "Fill out Game Design Document (interactive)",
+	[Phase.REVIEW]: "Review and approve Game Design Document",
+	[Phase.IMPLEMENT]: "Implement game from GDD",
 	[Phase.VALIDATE]: "Run validation (godot --headless --check-only --quiet)",
 	[Phase.BUILD]: "Run web build",
 	[Phase.VERIFY]: "Verify build succeeded",
@@ -130,15 +132,15 @@ async function runWorkflow(
 			case Phase.QUESTIONS:
 				state = await handleQuestions(ctx, state);
 				break;
+			case Phase.SETUP:
+				state = await handleSetup(pi, ctx, state);
+				break;
 			case Phase.PLAN:
 				state = await handlePlan(pi, ctx, state);
 				// After sending plan message, we return control — the LLM responds asynchronously
 				return;
 			case Phase.REVIEW:
 				state = await handleReview(ctx, state);
-				break;
-			case Phase.SETUP:
-				state = await handleSetup(pi, ctx, state);
 				break;
 			case Phase.IMPLEMENT:
 				state = await handleImplement(pi, ctx, state);
@@ -186,8 +188,8 @@ function toKebabCase(str: string): string {
 }
 
 /**
- * Copy the contents of the template folder into a new game folder.
- * Asks user for the folder name if not already in state.
+ * Copy the contents of the template folder into the game folder.
+ * Uses state.gameName (set during QUESTIONS) as the folder name.
  * Updates project.godot config/name in the destination.
  *
  * @returns The game folder name used, or null if cancelled/failed.
@@ -197,21 +199,7 @@ async function copyTemplateToNewGame(
 	ctx: ExtensionCommandContext,
 	state: WorkflowState,
 ): Promise<string | null> {
-	// Derive a suggested folder name from gameType
-	const suggestedName = state.gameName || toKebabCase(state.gameType || "untitled");
-
-	// Ask user for the game folder name
-	const folderName = await ctx.ui.input(
-		"Folder name for the new game (kebab-case, e.g., 'my-arcade-shooter'):",
-		suggestedName,
-	);
-	if (folderName === undefined) return null;
-	if (!folderName.trim()) {
-		ctx.ui.notify("Game folder name cannot be empty. Cancelling setup.", "error");
-		return null;
-	}
-
-	const gameFolder = folderName.trim();
+	const gameFolder = state.gameName || toKebabCase(state.gameType || "untitled");
 	const src = `${ctx.cwd}/template`;
 	const dst = `${ctx.cwd}/${gameFolder}`;
 
@@ -226,12 +214,12 @@ async function copyTemplateToNewGame(
 			ctx.ui.notify("Skipping template copy; using existing folder.", "info");
 			return gameFolder;
 		}
+	} else {
+		// Create destination directory if needed
+		await pi.exec("mkdir", ["-p", dst], { cwd: ctx.cwd });
 	}
 
 	ctx.ui.notify(`Copying template into "${gameFolder}/"...`, "info");
-
-	// Create destination directory if needed
-	await pi.exec("mkdir", ["-p", dst], { cwd: ctx.cwd });
 
 	// Copy all template files (excluding .godot/ directories)
 	const copyResult = await pi.exec("rsync", ["-a", "--exclude=.godot", `${src}/`, dst], {
@@ -271,6 +259,15 @@ async function handleQuestions(
 ): Promise<WorkflowState> {
 	ctx.ui.notify("Let's gather details for your Godot game.", "info");
 
+	// Ask for game folder name first
+	const defaultName = state.gameName || toKebabCase(state.gameType || "untitled");
+	const gameName = await ctx.ui.input(
+		"Folder name for the new game (kebab-case, e.g., 'my-arcade-shooter'):",
+		defaultName,
+	);
+	if (gameName === undefined) return { ...state, phase: Phase.DONE };
+	if (gameName.trim()) state = { ...state, gameName: gameName.trim() };
+
 	// Ask about game type
 	const gameType = await ctx.ui.input(
 		"What type of game? (e.g., 'platformer', 'puzzle', 'arcade shooter')",
@@ -303,87 +300,12 @@ async function handleQuestions(
 
 	// Confirm
 	const ok = await ctx.ui.confirm(
-		"Proceed with plan?",
-		`Game: ${state.gameType}\nScope: ${state.scope}\nFeatures: ${state.features.join(", ")}`,
+		"Proceed with setup?",
+		`Folder: ${state.gameName}\nGame: ${state.gameType}\nScope: ${state.scope}\nFeatures: ${state.features.join(", ")}`,
 	);
 	if (!ok) return state; // Loop back to questions
 
-	return { ...state, phase: Phase.PLAN };
-}
-
-async function handlePlan(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-	state: WorkflowState,
-): Promise<WorkflowState> {
-	// Delegate plan creation to the LLM
-	const prompt = [
-		`## Godot Game Generation Plan`,
-		``,
-		`Create a detailed numbered plan for generating a new Godot 4 game.`,
-		``,
-		`**Game Type:** ${state.gameType}`,
-		`**Scope:** ${state.scope}`,
-		`**Features:** ${state.features.join(", ")}`,
-		``,
-		`First, read the project README and docs/ to understand the project structure.`,
-		``,
-		`Then output a plan under a "Plan:" header like this (adjust steps as needed):`,
-		``,
-		`Plan:`,
-		`1. Analyze existing project structure and templates — understand how template/ is organized`,
-		`2. Copy template — the extension handles this automatically before implementation starts`,
-		`3. Set up main scene and core scripts for ${state.gameType}`,
-		`4. Implement core mechanics`,
-		`5. Add features: ${state.features.join(", ")}`,
-		`6. Validate with godot --headless --check-only`,
-		`7. Build for web`,
-		`8. Verify build`,
-		``,
-		`After completing each step during implementation, mark it with [DONE:n].`,
-		``,
-		`Read the project README and docs/, then output your plan.`,
-	].join("\n");
-
-	ctx.ui.notify("Asking LLM to create a plan...", "info");
-	pi.sendUserMessage(prompt);
-
-	// Move to REVIEW phase — will be picked up after LLM responds
-	return { ...state, phase: Phase.REVIEW };
-}
-
-async function handleReview(
-	ctx: ExtensionCommandContext,
-	state: WorkflowState,
-): Promise<WorkflowState> {
-	// Show the plan to the user for editing/approval
-	const plan = await ctx.ui.editor(
-		"Review the plan. Edit if needed, or submit as-is to approve.",
-		state.planText,
-	);
-	if (plan === undefined) {
-		// User cancelled
-		const action = await ctx.ui.select("Cancel workflow?", ["Go back", "Stop workflow"]);
-		if (action === "Stop workflow") return { ...state, phase: Phase.DONE };
-		return state;
-	}
-
-	state = { ...state, planText: plan };
-
-	const choice = await ctx.ui.select("What next?", [
-		"Looks good, proceed!",
-		"Refine the plan further",
-		"Cancel workflow",
-	]);
-
-	switch (choice) {
-		case "Looks good, proceed!":
-			return { ...state, phase: Phase.SETUP };
-		case "Refine the plan further":
-			return { ...state, phase: Phase.PLAN };
-		default:
-			return { ...state, phase: Phase.DONE };
-	}
+	return { ...state, phase: Phase.SETUP };
 }
 
 async function handleSetup(
@@ -391,7 +313,7 @@ async function handleSetup(
 	ctx: ExtensionCommandContext,
 	state: WorkflowState,
 ): Promise<WorkflowState> {
-	ctx.ui.notify("Setting up new game folder from template...", "info");
+	ctx.ui.notify(`Setting up "${state.gameName}" from template...`, "info");
 
 	const gameFolder = await copyTemplateToNewGame(pi, ctx, state);
 
@@ -406,17 +328,124 @@ async function handleSetup(
 			case "Retry setup":
 				return state; // Loop back to SETUP
 			case "Skip setup (use existing folder)":
-				return { ...state, phase: Phase.IMPLEMENT };
+				return { ...state, phase: Phase.PLAN };
 			default:
 				return { ...state, phase: Phase.DONE };
 		}
 	}
 
-	// Store the game name in state for downstream phases
+	// Ensure gameName in state matches actual folder used
 	state = { ...state, gameName: gameFolder };
 
 	ctx.ui.notify(`✅ Setup complete. Game folder: "${gameFolder}/".`, "info");
-	return { ...state, phase: Phase.IMPLEMENT };
+	return { ...state, phase: Phase.PLAN };
+}
+
+async function handlePlan(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	state: WorkflowState,
+): Promise<WorkflowState> {
+	const gddPath = `${ctx.cwd}/${state.gameName}/GAME_DESIGN.md`;
+
+	// Check if GDD has already been written to the game folder
+	const gddExists = await pi.exec("test", ["-f", gddPath], { cwd: ctx.cwd });
+	if (gddExists.code === 0) {
+		// GDD exists — read it and advance to review
+		const readResult = await pi.exec("cat", [gddPath], { cwd: ctx.cwd });
+		const gddContent = readResult.code === 0 ? readResult.stdout : "(could not read GDD)";
+		ctx.ui.notify("GDD found in game folder! Ready for review.", "info");
+		return { ...state, phase: Phase.REVIEW, planText: gddContent };
+	}
+
+	// If we already sent the prompt (planText === "pending"), just wait
+	if (state.planText === "pending") {
+		ctx.ui.notify(
+			"⏳ Waiting for LLM to write the GDD to the game folder... Continue running /godot-generate when done.",
+			"info",
+		);
+		return { ...state, phase: Phase.PLAN };
+	}
+
+	// First time entering PLAN — send prompt to LLM to fill the GDD
+	const templatePath = `${ctx.cwd}/template/GAME_DESIGN.md`;
+	let gddTemplate = "(template not found)";
+	try {
+		const readResult = await pi.exec("cat", [templatePath], { cwd: ctx.cwd });
+		if (readResult.code === 0) {
+			gddTemplate = readResult.stdout;
+		}
+	} catch {
+		// fallback
+	}
+
+	const prompt = [
+		`## Game Design Document — ${state.gameName}`,
+		``,
+		`Your task is to create a complete Game Design Document for a ${state.gameType} game.`,
+		``,
+		`**Game Folder:** \\\`${state.gameName}/\\\``,
+		`**Scope:** ${state.scope}`,
+		`**Features:** ${state.features.join(", ")}`,
+		``,
+		`The template folder has already been copied to \\\`${state.gameName}/\\\`.`,
+		`A stub \\\`GAME_DESIGN.md\\\` template is at \\\`template/GAME_DESIGN.md\\\`.`,
+		``,
+		`### Your Instructions`,
+		``,
+		`1. **Read** the template at \\\`template/GAME_DESIGN.md\\\``,
+		`2. **Fill it out** by writing directly to \\\`${state.gameName}/GAME_DESIGN.md\\\` — replace every \\\`[placeholder]\\\` with concrete, specific details.`,
+		`3. **Ask clarifying questions** as you go — I'll answer them to help you make good design decisions for this ${state.gameType} game.`,
+		`4. Once the GDD is complete and you're satisfied with it, **tell me it's ready for review**.`,
+		``,
+		``,
+		`Here is the template:`,
+		``,
+		"```",
+		gddTemplate,
+		"```",
+	].join("\n");
+
+	ctx.ui.notify("Asking LLM to fill out the Game Design Document...", "info");
+	pi.sendUserMessage(prompt);
+
+	// Stay in PLAN phase — mark that we've sent the prompt
+	return { ...state, phase: Phase.PLAN, planText: "pending" };
+}
+
+async function handleReview(
+	ctx: ExtensionCommandContext,
+	state: WorkflowState,
+): Promise<WorkflowState> {
+	// Show the GDD to the user for editing/approval
+	const gdd = await ctx.ui.editor(
+		"Review the Game Design Document. Edit if needed, or submit as-is to approve.",
+		state.planText,
+	);
+	if (gdd === undefined) {
+		// User cancelled
+		const action = await ctx.ui.select("Cancel workflow?", ["Go back", "Stop workflow"]);
+		if (action === "Stop workflow") return { ...state, phase: Phase.DONE };
+		return state;
+	}
+
+	state = { ...state, planText: gdd };
+
+	const choice = await ctx.ui.select("What next?", [
+		"GDD looks good — implement the game!",
+		"Revise GDD (back to interactive planning)",
+		"Cancel workflow",
+	]);
+
+	switch (choice) {
+		case "GDD looks good — implement the game!":
+			return { ...state, phase: Phase.IMPLEMENT };
+		case "Revise GDD (back to interactive planning)":
+			// Reset planText so PLAN phase re-sends the prompt
+			return { ...state, phase: Phase.PLAN, planText: "" };
+		default:
+			return { ...state, phase: Phase.DONE };
+	}
 }
 
 async function handleImplement(
@@ -424,20 +453,38 @@ async function handleImplement(
 	ctx: ExtensionCommandContext,
 	state: WorkflowState,
 ): Promise<WorkflowState> {
-	// Delegate implementation to the LLM with the approved plan
+	const gddPath = `${ctx.cwd}/${state.gameName}/GAME_DESIGN.md`;
+
+	// First, save the approved GDD text to the game folder
+	// The user may have edited it in the review editor, so write it back
+	await pi.exec("bash", ["-c", `cat > "${gddPath}" << 'GDDEOF'\n${state.planText}\nGDDEOF`], {
+		cwd: ctx.cwd,
+		timeout: 5_000,
+	});
+
+	ctx.ui.notify(`GDD saved to ${state.gameName}/GAME_DESIGN.md`, "info");
+
+	// Send a fresh-context implementation prompt
 	const prompt = [
-		`## Implement the Godot Game`,
+		`## Implement the Godot Game — ${state.gameName}`,
 		``,
-		`Execute the following plan step by step. Mark completed steps with [DONE:n].`,
+		`This is a fresh implementation task. Read the Game Design Document from the file and implement the game.`,
 		``,
-		state.planText,
+		`**Game folder:** \\\`${state.gameName}/\\\` (already set up from template with project.godot, icon, etc.)`,
+		`**GDD:** \\\`${state.gameName}/GAME_DESIGN.md\\\` — Read this file for the full design specification.`,
 		``,
-		`The project is at ${ctx.cwd}.`,
-		state.gameName ? `Work in the game folder: "${state.gameName}/" (already set up from template).` : ``,
-		`After making changes, tell me which steps you completed.`,
+		`### Instructions`,
+		``,
+		`1. **Read** the GDD at \\\`${state.gameName}/GAME_DESIGN.md\\\` to understand the game design.`,
+		`2. **Create scenes and scripts** in \\\`${state.gameName}/\\\` to implement the game.`,
+		`3. **Follow the GDD exactly** — match the controls, mechanics, entities, and UI described there.`,
+		`4. **Run** \\\`godot --headless --check-only --quit --quiet\\\` to validate your changes after implementing.`,
+		`5. **Tell me** what you implemented and if validation passed.`,
+		``,
+		`Use the template project structure as a starting point.`,
 	].join("\n");
 
-	ctx.ui.notify("Asking LLM to implement changes...", "info");
+	ctx.ui.notify("Asking LLM to implement the game from the GDD...", "info");
 	pi.sendUserMessage(prompt);
 
 	// Advance to VALIDATE phase — LLM will respond asynchronously
@@ -554,24 +601,23 @@ async function handleVerify(
 	);
 	if (feedback === undefined) return { ...state, phase: Phase.DONE };
 
-	// Store feedback for the implementation phase
+	// Send feedback to LLM referencing the GDD
 	const prompt = [
-		`## Fix Issues`,
+		`## Fix Issues — ${state.gameName}`,
 		``,
-		`The previous build had issues that need fixing:`,
+		`The previous build had issues that need fixing. Continue implementing from the GDD.`,
 		``,
-		feedback,
+		`**Game folder:** \\\`${state.gameName}/\\\``,
+		`**GDD:** \\\`${state.gameName}/GAME_DESIGN.md\\\` (on disk — re-read it for full design details)`,
 		``,
-		`Continue executing the plan and fix these issues.`,
+		`**Feedback:** ${feedback}`,
 		``,
-		state.planText,
+		`Fix the issues above, then validate with \\\`godot --headless --check-only --quit --quiet\\\`.`,
 	].join("\n");
 
 	ctx.ui.notify("Sending feedback to LLM for fixes...", "info");
-	// Send the feedback to the LLM directly
 	pi.sendUserMessage(prompt);
 
-	// Keep phase as IMPLEMENT for next loop iteration — the LLM will respond
 	return { ...state, phase: Phase.VALIDATE };
 }
 
@@ -605,7 +651,7 @@ async function handleCommit(
 		timeout: 10_000,
 	});
 	if (commitResult.code !== 0) {
-		ctx.ui.notify(`git commit failed: ${commitResult.stderr.slice(0, 200)}`, "error");
+		ctx.ui.notify(`git commit failed: ${commitResult.stderr.slice(0, 200)}`, "error`);
 		const skip = await ctx.ui.confirm("Commit failed. Skip commit and push?", "");
 		if (skip) return { ...state, phase: Phase.PUSH };
 		return state;
@@ -639,7 +685,7 @@ async function handlePush(
 export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 	// ── /godot-generate: Full workflow ──
 	pi.registerCommand("godot-generate", {
-		description: "Start the full Godot generation workflow (questions → plan → build → deploy)",
+		description: "Start the full Godot generation workflow (questions → GDD → build → deploy)",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 
@@ -663,20 +709,30 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 
 	// ── /godot-plan: Planning only ──
 	pi.registerCommand("godot-plan", {
-		description: "Planning phase only (questions + plan creation/review)",
+		description: "Planning phase only (questions + GDD creation/review)",
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 
 			const state: WorkflowState = { ...DEFAULT_STATE, phase: Phase.QUESTIONS };
 
-			// Run questions and plan phases
+			// Run questions and setup phases
 			const afterQuestions = await handleQuestions(ctx, state);
 			if (afterQuestions.phase === Phase.DONE) return;
 
 			persistState(pi, afterQuestions);
 
-			// Send the plan prompt to LLM
-			await handlePlan(pi, ctx, afterQuestions);
+			// If questions advanced past SETUP, run setup too
+			let currentState = afterQuestions;
+			if (currentState.phase === Phase.SETUP) {
+				currentState = await handleSetup(pi, ctx, currentState);
+				if (currentState.phase === Phase.DONE) return;
+				persistState(pi, currentState);
+			}
+
+			// Send the GDD prompt to LLM
+			if (currentState.phase === Phase.PLAN) {
+				await handlePlan(pi, ctx, currentState);
+			}
 		},
 	});
 
