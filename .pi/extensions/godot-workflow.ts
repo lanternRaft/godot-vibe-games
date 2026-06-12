@@ -233,8 +233,8 @@ async function copyTemplateToNewGame(
 	// Create destination directory if needed
 	await pi.exec("mkdir", ["-p", dst], { cwd: ctx.cwd });
 
-	// Copy all template files (including hidden/dotfiles like .editorconfig, .godot/)
-	const copyResult = await pi.exec("cp", ["-r", `${src}/.`, dst], {
+	// Copy all template files (excluding .godot/ directories)
+	const copyResult = await pi.exec("rsync", ["-a", "--exclude=.godot", `${src}/`, dst], {
 		cwd: ctx.cwd,
 		timeout: 30_000,
 	});
