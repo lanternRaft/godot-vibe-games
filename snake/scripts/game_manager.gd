@@ -6,8 +6,8 @@ enum GameState { START_MENU, PLAYING, PAUSED, GAME_OVER }
 
 const GRID_WIDTH: int = 20
 const GRID_HEIGHT: int = 20
-const CELL_SIZE: int = 32
-const PLAY_AREA_OFFSET: Vector2 = Vector2(80, 80)
+const CELL_SIZE: int = 40
+const PLAY_AREA_OFFSET: Vector2 = Vector2(0, 0)
 
 const BASE_TICK_INTERVAL: float = 0.2
 const SPEED_INCREASE_PER_TIER: float = 0.025

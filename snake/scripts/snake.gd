@@ -6,7 +6,7 @@ class_name Snake
 ## Grid constants (local copies to avoid circular dependency on GameManager).
 const GRID_W: int = 20
 const GRID_H: int = 20
-const CELL_SZ: int = 32
+const CELL_SZ: int = 40
 
 var _segments: Array[Vector2i] = []
 var _direction: Vector2i = Vector2i.RIGHT

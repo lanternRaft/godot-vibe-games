@@ -9,6 +9,12 @@
  *   /godot-plan             - Planning phase only (questions + GDD creation/review)
  *   /godot-state            - Show current workflow state
  *   /godot-implement-gdd    - Implement directly from existing GAME_DESIGN.md (skip planning)
+ *   /godot-tweak            - Quick tweak: pick game → describe change → implement → pipeline
+ *   /godot-validate [game]  - Run Godot validation on a game folder
+ *   /godot-build [game]     - Run web build for a game folder
+ *   /godot-verify [game]    - Verify a completed build
+ *   /godot-commit           - Commit all staged changes
+ *   /godot-push             - Push to remote
  *
  * State Machine Phases:
  *   QUESTIONS  →  SETUP  →  PLAN (interactive GDD)  →  REVIEW  →  IMPLEMENT  →  VALIDATE  →  BUILD  →  VERIFY  →  COMMIT  →  PUSH  →  DONE
@@ -190,6 +196,54 @@ async function detectGameFolders(
 	);
 	if (result.code !== 0) return [];
 	return result.stdout.trim().split("\n").filter(Boolean);
+}
+
+/**
+ * Detect Godot project folders that contain a project.godot file.
+ * Excludes the template/ directory.
+ */
+async function detectGodotProjects(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+): Promise<string[]> {
+	const result = await pi.exec(
+		"bash",
+		["-c", `for d in */; do [ -f "$d/project.godot" ] && basename "$d"; done`],
+		{ cwd: ctx.cwd },
+	);
+	if (result.code !== 0) return [];
+	return result.stdout.trim().split("\n").filter(Boolean).filter((d) => d !== "template");
+}
+
+/**
+ * Resolve a game folder from a command argument or a picker.
+ * Returns null if no folder is selected or none exist.
+ */
+async function pickGameFolder(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	args: string[],
+): Promise<string | null> {
+	let gameFolder = args[0]?.trim() || "";
+	if (gameFolder) {
+		// Verify the folder exists and has a project.godot
+		const exists = await pi.exec("test", ["-d", `${ctx.cwd}/${gameFolder}`], { cwd: ctx.cwd });
+		if (exists.code !== 0) {
+			ctx.ui.notify(`Folder "${gameFolder}" not found.`, "error");
+			return null;
+		}
+		return gameFolder;
+	}
+
+	const folders = await detectGodotProjects(pi, ctx);
+	if (folders.length === 0) {
+		ctx.ui.notify("No Godot game folders found in this project.", "error");
+		return null;
+	}
+
+	const selected = await ctx.ui.select("Select a game folder:", folders);
+	if (!selected || selected === "Cancel") return null;
+	return selected;
 }
 
 /**
@@ -511,7 +565,7 @@ async function handleValidate(
 ): Promise<WorkflowState> {
 	ctx.ui.notify("Running Godot validation...", "info");
 
-	const result = await pi.exec("godot", ["--headless", "--check-only", "--quit", "--quiet"], { cwd: ctx.cwd, timeout: 120_000 });
+	const result = await pi.exec("godot", ["--headless", "--check-only", "--quit", "--quiet", "--path", state.gameName], { cwd: ctx.cwd, timeout: 120_000 });
 
 	if (result.code !== 0) {
 		const stderr = result.stderr.split("\n").filter(l => !l.includes("ObjectDB instances leaked at exit")).join("\n");
@@ -558,6 +612,7 @@ async function handleBuild(
 		"--export-debug",
 		"Web",
 		"export/debug/index.html",
+		"--path", state.gameName,
 	], { cwd: ctx.cwd, timeout: 300_000 });
 
 	if (result.code !== 0) {
@@ -847,6 +902,208 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 
 			persistState(pi, state);
 			await runWorkflow(pi, ctx, state);
+		},
+	});
+
+	// ── /godot-tweak: Quick tweak pipeline ──
+	pi.registerCommand("godot-tweak", {
+		description: "Quick tweak: pick a game, describe the change, then run validate → build → verify → commit → push",
+		handler: async (args, ctx) => {
+			await ctx.waitForIdle();
+
+			const gameFolder = await pickGameFolder(pi, ctx, args);
+			if (!gameFolder) return;
+
+			const gddPath = `${ctx.cwd}/${gameFolder}/GAME_DESIGN.md`;
+			const gddExists = await pi.exec("test", ["-f", gddPath], { cwd: ctx.cwd });
+			let gddContent = "(no GDD found)";
+			if (gddExists.code === 0) {
+				const readResult = await pi.exec("cat", [gddPath], { cwd: ctx.cwd });
+				if (readResult.code === 0) gddContent = readResult.stdout;
+			}
+
+			const tweakDesc = await ctx.ui.input(
+				"What needs to change? Describe the tweak:",
+				"",
+			);
+			if (tweakDesc === undefined || !tweakDesc.trim()) {
+				ctx.ui.notify("No tweak described. Cancelling.", "info");
+				return;
+			}
+
+			// Create state that starts at VALIDATE after LLM implements the tweak
+			const state: WorkflowState = {
+				...DEFAULT_STATE,
+				phase: Phase.IMPLEMENT,
+				gameName: gameFolder,
+				gameType: gameFolder,
+				scope: `tweak: ${tweakDesc}`,
+				features: [],
+				planText: gddContent,
+				retryCount: 0,
+				maxRetries: 3,
+			};
+
+			persistState(pi, state);
+
+			const prompt = [
+				`## Quick Tweak — ${gameFolder}`,
+				``,
+				`This is a small adjustment to an existing game.`,
+				``,
+				`**Game folder:** \`${gameFolder}/\``,
+				`**GDD:** \`${gameFolder}/GAME_DESIGN.md\` (on disk — read it for context)`,
+				``,
+				`### Tweak Request`,
+				tweakDesc,
+				``,
+				`### Instructions`,
+				`1. Read the GDD at \`${gameFolder}/GAME_DESIGN.md\` for context.`,
+				`2. Make the described change by editing scenes and scripts in \`${gameFolder}/\`.`,
+				`3. Keep existing functionality intact — only change what's needed.`,
+				`4. Once done, validate locally with \`godot --path ${gameFolder} --headless --check-only --quit --quiet\`.`,
+				`5. Tell me the tweak is complete.`,
+			].join("\n");
+
+			ctx.ui.notify(`Sending tweak request for "${gameFolder}" to LLM...`, "info");
+			pi.sendUserMessage(prompt);
+
+			// The LLM responds asynchronously; advance to VALIDATE phase
+			state.phase = Phase.VALIDATE;
+			persistState(pi, state);
+		},
+	});
+
+	// ── /godot-validate: Standalone validation ──
+	pi.registerCommand("godot-validate", {
+		description: "Run Godot validation on a game folder (godot --headless --check-only)",
+		handler: async (args, ctx) => {
+			await ctx.waitForIdle();
+
+			const gameFolder = await pickGameFolder(pi, ctx, args);
+			if (!gameFolder) return;
+
+			ctx.ui.notify(`Validating "${gameFolder}" with godot --headless --check-only --quit --quiet`, "info");
+
+			const result = await pi.exec("godot", ["--headless", "--check-only", "--quit", "--quiet", "--path", gameFolder], {
+				cwd: ctx.cwd,
+				timeout: 120_000,
+			});
+
+			ctx.ui.notify(result.stderr);
+
+			if (result.code !== 0) {
+				const stderr = result.stderr.split("\n").filter(l => !l.includes("ObjectDB instances leaked at exit")).join("\n");
+				const stdout = result.stdout.split("\n").filter(l => !l.includes("ObjectDB instances leaked at exit")).join("\n");
+				const errorPreview = stderr.slice(0, 1000) || stdout.slice(0, 1000);
+				ctx.ui.notify(`❌ Validation failed (exit ${result.code})`, "error");
+				ctx.ui.notify(errorPreview, "error");
+				return;
+			}
+
+			ctx.ui.notify(`✅ "${gameFolder}" validation passed!`, "info");
+		},
+	});
+
+	// ── /godot-build: Standalone web build ──
+	pi.registerCommand("godot-build", {
+		description: "Run a web build for a game folder",
+		handler: async (args, ctx) => {
+			await ctx.waitForIdle();
+
+			const gameFolder = await pickGameFolder(pi, ctx, args);
+			if (!gameFolder) return;
+
+			ctx.ui.notify(`Building "${gameFolder}" for web...`, "info");
+
+			const result = await pi.exec("godot", [
+				"--headless",
+				"--export-debug",
+				"Web",
+				"export/debug/index.html",
+				"--path", gameFolder,
+			], { cwd: ctx.cwd, timeout: 300_000 });
+
+			if (result.code !== 0) {
+				const errorPreview = result.stderr.slice(0, 1000) || result.stdout.slice(0, 1000);
+				ctx.ui.notify(`❌ Web build failed (exit ${result.code})`, "error");
+				ctx.ui.notify(errorPreview, "error");
+				return;
+			}
+
+			ctx.ui.notify(`✅ "${gameFolder}" web build completed!`, "info");
+		},
+	});
+
+	// ── /godot-verify: Standalone build verification ──
+	pi.registerCommand("godot-verify", {
+		description: "Verify a completed build looks good",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+
+			const ok = await ctx.ui.confirm(
+				"Build verification",
+				"Does the build output look good? If not, describe what needs fixing.",
+			);
+
+			if (ok) {
+				ctx.ui.notify("✅ Build verified!", "info");
+			} else {
+				ctx.ui.notify("Build needs fixes. Use /godot-tweak to describe changes.", "info");
+			}
+		},
+	});
+
+	// ── /godot-commit: Standalone git commit ──
+	pi.registerCommand("godot-commit", {
+		description: "Commit all staged changes",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+
+			ctx.ui.notify("Committing changes...", "info");
+
+			const addResult = await pi.exec("git", ["add", "-A"], { cwd: ctx.cwd, timeout: 10_000 });
+			if (addResult.code !== 0) {
+				ctx.ui.notify(`git add failed: ${addResult.stderr.slice(0, 200)}`, "error");
+				return;
+			}
+
+			const statusResult = await pi.exec("git", ["status", "--porcelain"], { cwd: ctx.cwd, timeout: 10_000 });
+			if (!statusResult.stdout.trim()) {
+				ctx.ui.notify("Nothing to commit — working tree clean.", "info");
+				return;
+			}
+
+			const commitResult = await pi.exec("git", ["commit", "-m", "godot: tweak"], {
+				cwd: ctx.cwd,
+				timeout: 10_000,
+			});
+
+			if (commitResult.code !== 0) {
+				ctx.ui.notify(`git commit failed: ${commitResult.stderr.slice(0, 200)}`, "error");
+				return;
+			}
+
+			ctx.ui.notify("✅ Committed.", "info");
+		},
+	});
+
+	// ── /godot-push: Standalone git push ──
+	pi.registerCommand("godot-push", {
+		description: "Push to remote",
+		handler: async (_args, ctx) => {
+			await ctx.waitForIdle();
+
+			ctx.ui.notify("Pushing to remote...", "info");
+
+			const pushResult = await pi.exec("git", ["push"], { cwd: ctx.cwd, timeout: 30_000 });
+
+			if (pushResult.code !== 0) {
+				ctx.ui.notify(`git push failed: ${pushResult.stderr.slice(0, 300)}`, "error");
+				return;
+			}
+
+			ctx.ui.notify("✅ Pushed to remote!", "info");
 		},
 	});
 
