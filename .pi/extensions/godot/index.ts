@@ -25,6 +25,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { handleValidate as validatePhaseHandler, registerValidationCommand } from "./validation";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -154,7 +155,7 @@ async function runWorkflow(
 				// After sending implement message, we return control — the LLM responds asynchronously
 				return;
 			case Phase.VALIDATE:
-				state = await handleValidate(pi, ctx, state);
+				state = await validatePhaseHandler(pi, ctx, state, { pickGameFolder });
 				break;
 			case Phase.BUILD:
 				state = await handleBuild(ctx, state);
@@ -186,30 +187,6 @@ async function runWorkflow(
  * Run godot validation for a given game folder.
  * Returns structured result with success, exitCode, and errorPreview.
  */
-async function runValidation(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-	gameFolder: string,
-): Promise<{ success: boolean; exitCode: number; errorPreview: string }> {
-	const result = await pi.exec(
-		"godot",
-		["--headless", "--check-only", "--quit", "--path", gameFolder],
-		{ cwd: ctx.cwd, timeout: 120_000 },
-	);
-
-	const stderr = result.stderr
-		.split("\n")
-		.filter((l) => !l.includes("ObjectDB instances leaked at exit"))
-		.join("\n");
-	const stdout = result.stdout
-		.split("\n")
-		.filter((l) => !l.includes("ObjectDB instances leaked at exit"))
-		.join("\n");
-	const errorPreview = stderr.slice(0, 1000) || stdout.slice(0, 1000);
-
-	return { success: result.code === 0, exitCode: result.code, errorPreview };
-}
-
 /**
  * Detect game folders that contain a GAME_DESIGN.md file.
  */
@@ -590,46 +567,6 @@ async function handleImplement(
 	return { ...state, phase: Phase.VALIDATE };
 }
 
-async function handleValidate(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-	state: WorkflowState,
-): Promise<WorkflowState> {
-	ctx.ui.notify("Running Godot validation...", "info");
-
-	const { success, exitCode, errorPreview } = await runValidation(pi, ctx, state.gameName);
-
-	if (!success) {
-		ctx.ui.notify(`Validation failed (exit ${exitCode})`, "error");
-
-		const action = await ctx.ui.select("Validation error — what now?", [
-			"Go back and fix issues",
-			"Retry validation",
-			"Skip validation and continue",
-			"Stop workflow",
-		]);
-
-		switch (action) {
-			case "Go back and fix issues":
-				state.retryCount++;
-				if (state.retryCount > state.maxRetries) {
-					ctx.ui.notify("Max retries exceeded. Stopping.", "error");
-					return { ...state, phase: Phase.DONE };
-				}
-				return { ...state, phase: Phase.IMPLEMENT };
-			case "Retry validation":
-				return state; // Loop back to VALIDATE
-			case "Skip validation and continue":
-				return { ...state, phase: Phase.BUILD };
-			default:
-				return { ...state, phase: Phase.DONE };
-		}
-	}
-
-	ctx.ui.notify("✅ Validation passed!", "success");
-	return { ...state, phase: Phase.BUILD };
-}
-
 async function handleBuild(
 	ctx: ExtensionCommandContext,
 	state: WorkflowState,
@@ -804,6 +741,9 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 			await runWorkflow(pi, ctx, state);
 		},
 	});
+
+	// ── /godot-validate: Standalone validation (registered from validation.ts) ──
+	registerValidationCommand(pi, pickGameFolder);
 
 	// ── /godot-plan: Planning only ──
 	pi.registerCommand("godot-plan", {
@@ -1000,29 +940,6 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 			// The LLM responds asynchronously; advance to VALIDATE phase
 			state.phase = Phase.VALIDATE;
 			persistState(pi, state);
-		},
-	});
-
-	// ── /godot-validate: Standalone validation ──
-	pi.registerCommand("godot-validate", {
-		description: "Run Godot validation on a game folder (godot --headless --check-only)",
-		handler: async (args, ctx) => {
-			await ctx.waitForIdle();
-
-			const gameFolder = await pickGameFolder(pi, ctx, args);
-			if (!gameFolder) return;
-
-			ctx.ui.notify(`Validating "${gameFolder}" with godot --headless --check-only --quit --quiet`, "info");
-
-			const { success, exitCode, errorPreview } = await runValidation(pi, ctx, gameFolder);
-
-			if (!success) {
-				ctx.ui.notify(`❌ Validation failed (exit ${exitCode})`, "error");
-				ctx.ui.notify(errorPreview, "error");
-				return;
-			}
-
-			ctx.ui.notify(`✅ "${gameFolder}" validation passed!`, "success");
 		},
 	});
 
