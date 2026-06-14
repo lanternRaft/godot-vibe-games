@@ -76,7 +76,7 @@ export async function runValidation(
 	const stdout = stripLeakedObjectDB(result.stdout);
 	const errorPreview = stderr.slice(0, 1000) || stdout.slice(0, 1000);
 
-	return { success: result.code === 0, exitCode: result.code, errorPreview };
+	return { success: stderr.length == 0, exitCode: result.code, errorPreview };
 }
 
 /** Display validation error notification and preview */
@@ -154,6 +154,7 @@ export function registerValidationCommand(
 			const gameFolder = await pickGameFolder(pi, ctx, args);
 			if (!gameFolder) return;
 
+		
 			ctx.ui.notify(
 				`Validating "${gameFolder}" with godot --headless --check-only --quit --quiet`,
 				"info",

@@ -10,7 +10,7 @@ const CELL_SZ: int = 40
 
 var _segments: Array[Vector2i] = []
 var _direction: Vector2i = Vector2i.RIGHT
-var _direction_queue: Array[Vector2i] = []
+var _direction_queue: Array[Vector2i] = [
 var _grow_pending: int = 0
 var _is_dead: bool = false
 var _grid_to_pixel: Callable
