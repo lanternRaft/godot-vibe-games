@@ -25,7 +25,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { handleValidate as validatePhaseHandler, registerValidationCommand } from "./validation";
+import { handleValidationStep as validatePhaseHandler, registerValidationCommand } from "./validation";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

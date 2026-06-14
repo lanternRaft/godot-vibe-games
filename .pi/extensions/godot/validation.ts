@@ -89,26 +89,66 @@ function notifyValidationError(
 	if (errorPreview) ui.notify(errorPreview, "error");
 }
 
-// ── State machine phase handler ──────────────────────────────────────────────
+// ── Unified check-and-fix loop ───────────────────────────────────────────────
+
+/**
+ * Run validation and, on failure, send a user message to the model
+ * asking it to fix the discovered issues.
+ *
+ * This is the single check-and-fix loop used by both the standalone
+ * /godot-validate command and the workflow state machine.
+ */
+export async function handleValidation(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	gameFolder: string,
+): Promise<ValidationResult> {
+	ctx.ui.notify("Running Godot validation...", "info");
+
+	const result = await runValidation(pi, ctx, gameFolder);
+
+	if (!result.success) {
+		notifyValidationError(ctx.ui, result.exitCode, result.errorPreview);
+		ctx.ui.notify("Asking the model to fix the validation errors…", "info");
+
+		pi.sendUserMessage(
+			[
+				{
+					type: "text",
+					text: `Godot validation failed for "${gameFolder}"`,
+				},
+				{
+					type: "text",
+					text: `Here are the errors:\n\n${result.errorPreview || "(no error output)"}\n\nPlease fix these issues so the project passes \`godot --headless --check-only\`.`,
+				},
+			],
+			{ deliverAs: "followUp" },
+		);
+	} else {
+		ctx.ui.notify("✅ Validation passed!", "success");
+	}
+
+	return result;
+}
+
+// ── Workflow state machine step handler ───────────────────────────────────────
 
 /**
  * Handle the VALIDATE phase of the workflow state machine.
- * Runs validation and presents choices on failure/success.
+ * Delegates the actual check-and-fix to handleValidation, then
+ * manages phase transitions via user selection.
+ *
  * `deps` provides the pickGameFolder utility from the workflow module.
  */
-export async function handleValidate(
+export async function handleValidationStep(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	state: WorkflowState,
 	_deps: ValidationDeps,
 ): Promise<WorkflowState> {
-	ctx.ui.notify("Running Godot validation...", "info");
-
-	const { success, exitCode, errorPreview } = await runValidation(pi, ctx, state.gameName);
+	const { success } = await handleValidation(pi, ctx, state.gameName);
 
 	if (!success) {
-		notifyValidationError(ctx.ui, exitCode, errorPreview);
-
 		const action = await ctx.ui.select("Validation error — what now?", [
 			"Go back and fix issues",
 			"Retry validation",
@@ -132,7 +172,6 @@ export async function handleValidate(
 		}
 	}
 
-	ctx.ui.notify("✅ Validation passed!", "success");
 	return { ...state, phase: Phase.BUILD };
 }
 
@@ -140,6 +179,7 @@ export async function handleValidate(
 
 /**
  * Register the standalone /godot-validate command.
+ * Uses handleValidation so the model is asked to fix any issues found.
  * `pickGameFolder` is injected to avoid circular imports with the workflow module.
  */
 export function registerValidationCommand(
@@ -147,27 +187,15 @@ export function registerValidationCommand(
 	pickGameFolder: ValidationDeps["pickGameFolder"],
 ): void {
 	pi.registerCommand("godot-validate", {
-		description: "Run Godot validation on a game folder (godot --headless --check-only)",
+		description:
+			"Run Godot validation on a game folder (godot --headless --check-only) and ask the model to fix any issues",
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 
 			const gameFolder = await pickGameFolder(pi, ctx, args);
 			if (!gameFolder) return;
 
-		
-			ctx.ui.notify(
-				`Validating "${gameFolder}" with godot --headless --check-only --quit --quiet`,
-				"info",
-			);
-
-			const { success, exitCode, errorPreview } = await runValidation(pi, ctx, gameFolder);
-
-			if (!success) {
-				notifyValidationError(ctx.ui, exitCode, errorPreview);
-				return;
-			}
-
-			ctx.ui.notify(`✅ "${gameFolder}" validation passed!`, "success");
+			await handleValidation(pi, ctx, gameFolder);
 		},
 	});
 }
