@@ -92,45 +92,91 @@ function notifyValidationError(
 // ── Unified check-and-fix loop ───────────────────────────────────────────────
 
 /**
- * Run validation and, on failure, send a user message to the model
- * asking it to fix the discovered issues.
- *
- * This is the single check-and-fix loop used by both the standalone
- * /godot-validate command and the workflow state machine.
+ * Run validation and loop continuously. 
+ * Automatically asks the model to fix issues up to 3 times.
+ * If it still fails, prompts the user for feedback and continues 
+ * looping until validation passes or the user explicitly exits.
  */
 export async function handleValidation(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-	gameFolder: string,
+    pi: ExtensionAPI,
+    ctx: ExtensionCommandContext,
+    gameFolder: string,
 ): Promise<ValidationResult> {
-	ctx.ui.notify("Running Godot validation...", "info");
+    let attempt = 1;
+    const MAX_AUTO_RETRIES = 3;
 
-	const result = await runValidation(pi, ctx, gameFolder);
+    while (true) {
+        ctx.ui.notify(`Running Godot validation... (Attempt ${attempt})`, "info");
 
-	if (!result.success) {
-		notifyValidationError(ctx.ui, result.exitCode, result.errorPreview);
-		ctx.ui.notify("Asking the model to fix the validation errors…", "info");
+        const result = await runValidation(pi, ctx, gameFolder);
 
-		pi.sendUserMessage(
-			[
-				{
-					type: "text",
-					text: `Godot validation failed for "${gameFolder}"`,
-				},
-				{
-					type: "text",
-					text: `Here are the errors:\n\n${result.errorPreview || "(no error output)"}\n\nPlease fix these issues so the project passes \`godot --headless --check-only\`.`,
-				},
-			],
-			{ deliverAs: "followUp" },
-		);
-	} else {
-		ctx.ui.notify("✅ Validation passed!", "success");
-	}
+        if (result.success) {
+            ctx.ui.notify("✅ Validation passed!", "success");
+            return result;
+        }
 
-	return result;
+        // Validation Failed
+        notifyValidationError(ctx.ui, result.exitCode, result.errorPreview);
+
+        if (attempt <= MAX_AUTO_RETRIES) {
+            ctx.ui.notify(`Asking the model to fix the validation errors (Attempt ${attempt}/${MAX_AUTO_RETRIES})…`, "info");
+
+            await pi.sendUserMessage(
+                [
+                    {
+                        type: "text",
+                        text: `Godot validation failed for "${gameFolder}".`
+                    },
+                    {
+                        type: "text",
+                        text: `Errors:\n\n${result.errorPreview || "(no error output)"}\n\n`
+                    },
+                ],
+                { deliverAs: "followUp" },
+            );
+
+            // Wait for the model to finish its turn before looping back to runValidation
+            await ctx.waitForIdle();
+        } else {
+            // Fails after 3 tries: pause and wait for user feedback
+            // Adjust `ctx.ui.prompt` if your UI API uses a different method name for text inputs
+            const userFeedback = await ctx.ui.prompt(
+                "Validation failed 3 times. Please provide guidance for the model to help it fix the issue, or type 'exit' to abort:"
+            );
+
+            // If user cancels the prompt or types 'exit', break the cycle
+            if (!userFeedback || userFeedback.trim().toLowerCase() === "exit") {
+                ctx.ui.notify("Validation loop aborted by user.", "info");
+                return result; 
+            }
+
+            ctx.ui.notify("Forwarding your feedback to the model...", "info");
+
+            await pi.sendUserMessage(
+                [
+                    {
+                        type: "text",
+                        text: `Validation is still failing for "${gameFolder}". The user has provided the following guidance to help you:`
+                    },
+                    {
+                        type: "text",
+                        text: userFeedback
+                    },
+                    {
+                        type: "text",
+                        text: `Implement these suggestions`
+                    }
+                ],
+                { deliverAs: "followUp" },
+            );
+
+            // Wait for the model to apply the user's feedback before looping back
+            await ctx.waitForIdle();
+        }
+
+        attempt++;
+    }
 }
-
 // ── Workflow state machine step handler ───────────────────────────────────────
 
 /**
