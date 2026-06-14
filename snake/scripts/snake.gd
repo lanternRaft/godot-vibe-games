@@ -28,7 +28,7 @@ func reset() -> void:
 	var center_y: float = float(GRID_H) / 2.0
 	_segments = [
 		Vector2i(int(center_x), int(center_y)),
-		Vecto1r2i(int(center_x) - 1, int(center_y)),
+		Vector2i(int(center_x) - 1, int(center_y)),
 		Vector2i(int(center_x) - 2, int(center_y)),
 	]
 	_direction = Vector2i.RIGHT

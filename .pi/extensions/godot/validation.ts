@@ -58,6 +58,16 @@ function stripLeakedObjectDB(text: string): string {
 }
 
 /**
+ * Convert res:// paths in error output to relative filesystem paths.
+ * Replaces "res://" with "<gameFolder>/" so that LLMs can read the
+ * referenced files directly (e.g., "res://scripts/snake.gd" becomes
+ * "snake/scripts/snake.gd").
+ */
+function convertResPath(text: string, gameFolder: string): string {
+	return text.replace(/res:\/\//g, `${gameFolder}/`);
+}
+
+/**
  * Run godot validation for a given game folder.
  * Returns structured result with success, exitCode, and errorPreview.
  */
@@ -74,7 +84,10 @@ export async function runValidation(
 
 	const stderr = stripLeakedObjectDB(result.stderr);
 	const stdout = stripLeakedObjectDB(result.stdout);
-	const errorPreview = stderr.slice(0, 1000) || stdout.slice(0, 1000);
+	const errorPreview = convertResPath(
+		stderr.slice(0, 1000) || stdout.slice(0, 1000),
+		gameFolder,
+	);
 
 	return { success: stderr.length == 0, exitCode: result.code, errorPreview };
 }
