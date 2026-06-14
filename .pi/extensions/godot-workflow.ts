@@ -154,7 +154,7 @@ async function runWorkflow(
 				// After sending implement message, we return control — the LLM responds asynchronously
 				return;
 			case Phase.VALIDATE:
-				state = await handleValidate(ctx, state);
+				state = await handleValidate(pi, ctx, state);
 				break;
 			case Phase.BUILD:
 				state = await handleBuild(ctx, state);
@@ -181,6 +181,39 @@ async function runWorkflow(
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
+
+/**
+ * Run godot validation for a given game folder.
+ * Returns structured result with success, exitCode, and errorPreview.
+ */
+async function runValidation(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	gameFolder: string,
+): Promise<{ success: boolean; exitCode: number; errorPreview: string }> {
+	const result = await pi.exec(
+		"godot",
+		["--headless", "--check-only", "--quit", "--path", gameFolder],
+		{ cwd: ctx.cwd, timeout: 120_000 },
+	);
+
+	ctx.ui.notify("WHATT!!!", "error");
+	ctx.ui.notify(result.code, "error");
+
+	ctx.ui.notify(result.stderr, "error");
+	ctx.ui.notify(result.stdout, "error");
+	const stderr = result.stderr
+		.split("\n")
+		.filter((l) => !l.includes("ObjectDB instances leaked at exit"))
+		.join("\n");
+	const stdout = result.stdout
+		.split("\n")
+		.filter((l) => !l.includes("ObjectDB instances leaked at exit"))
+		.join("\n");
+	const errorPreview = stderr.slice(0, 1000) || stdout.slice(0, 1000);
+
+	return { success: result.code === 0, exitCode: result.code, errorPreview };
+}
 
 /**
  * Detect game folders that contain a GAME_DESIGN.md file.
@@ -563,18 +596,16 @@ async function handleImplement(
 }
 
 async function handleValidate(
+	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	state: WorkflowState,
 ): Promise<WorkflowState> {
 	ctx.ui.notify("Running Godot validation...", "info");
 
-	const result = await pi.exec("godot", ["--headless", "--check-only", "--quit", "--quiet", "--path", state.gameName], { cwd: ctx.cwd, timeout: 120_000 });
+	const { success, exitCode, errorPreview } = await runValidation(pi, ctx, state.gameName);
 
-	if (result.code !== 0) {
-		const stderr = result.stderr.split("\n").filter(l => !l.includes("ObjectDB instances leaked at exit")).join("\n");
-		const stdout = result.stdout.split("\n").filter(l => !l.includes("ObjectDB instances leaked at exit")).join("\n");
-		const errorPreview = stderr.slice(0, 1000) || stdout.slice(0, 1000);
-		ctx.ui.notify(`Validation failed (exit ${result.code})`, "error");
+	if (!success) {
+		ctx.ui.notify(`Validation failed (exit ${exitCode})`, "error");
 
 		const action = await ctx.ui.select("Validation error — what now?", [
 			"Go back and fix issues",
@@ -988,18 +1019,10 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 
 			ctx.ui.notify(`Validating "${gameFolder}" with godot --headless --check-only --quit --quiet`, "info");
 
-			const result = await pi.exec("godot", ["--headless", "--check-only", "--quit", "--quiet", "--path", gameFolder], {
-				cwd: ctx.cwd,
-				timeout: 120_000,
-			});
+			const { success, exitCode, errorPreview } = await runValidation(pi, ctx, gameFolder);
 
-			ctx.ui.notify(result.stderr);
-
-			if (result.code !== 0) {
-				const stderr = result.stderr.split("\n").filter(l => !l.includes("ObjectDB instances leaked at exit")).join("\n");
-				const stdout = result.stdout.split("\n").filter(l => !l.includes("ObjectDB instances leaked at exit")).join("\n");
-				const errorPreview = stderr.slice(0, 1000) || stdout.slice(0, 1000);
-				ctx.ui.notify(`❌ Validation failed (exit ${result.code})`, "error");
+			if (!success) {
+				ctx.ui.notify(`❌ Validation failed (exit ${exitCode})`, "error");
 				ctx.ui.notify(errorPreview, "error");
 				return;
 			}
