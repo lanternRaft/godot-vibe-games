@@ -26,6 +26,8 @@
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { handleValidationStep as validatePhaseHandler, registerValidationCommand } from "./validation";
+import { handleCommit, registerCommitCommand } from "./commit";
+import { handlePush, registerPushCommand } from "./push";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -164,10 +166,10 @@ async function runWorkflow(
 				state = await handleVerify(ctx, state);
 				break;
 			case Phase.COMMIT:
-				state = await handleCommit(ctx, state);
+				state = await handleCommit(pi, ctx, state);
 				break;
 			case Phase.PUSH:
-				state = await handlePush(ctx, state);
+				state = await handlePush(pi, ctx, state);
 				break;
 			case Phase.DONE:
 				ctx.ui.notify("🎮 Godot generation complete!", "info");
@@ -656,64 +658,7 @@ async function handleVerify(
 	return { ...state, phase: Phase.VALIDATE };
 }
 
-async function handleCommit(
-	ctx: ExtensionCommandContext,
-	state: WorkflowState,
-): Promise<WorkflowState> {
-	ctx.ui.notify("Committing changes...", "info");
 
-	const commitMessage = `Generate ${state.gameType} game: ${state.scope}`;
-
-	// Add all files
-	const addResult = await pi.exec("git", ["add", "-A"], { cwd: ctx.cwd, timeout: 10_000 });
-	if (addResult.code !== 0) {
-		ctx.ui.notify(`git add failed: ${addResult.stderr.slice(0, 200)}`, "error");
-		const skip = await ctx.ui.confirm("Commit failed. Skip commit?", "");
-		if (skip) return { ...state, phase: Phase.PUSH };
-		return state; // Retry
-	}
-
-	// Check if there's anything to commit
-	const statusResult = await pi.exec("git", ["status", "--porcelain"], { cwd: ctx.cwd, timeout: 10_000 });
-	if (!statusResult.stdout.trim()) {
-		ctx.ui.notify("Nothing to commit — all changes already staged. Skipping commit.", "info");
-		return { ...state, phase: Phase.PUSH };
-	}
-
-	// Commit
-	const commitResult = await pi.exec("git", ["commit", "-m", commitMessage], {
-		cwd: ctx.cwd,
-		timeout: 10_000,
-	});
-	if (commitResult.code !== 0) {
-		ctx.ui.notify(`git commit failed: ${commitResult.stderr.slice(0, 200)}`, "error");
-		const skip = await ctx.ui.confirm("Commit failed. Skip commit and push?", "");
-		if (skip) return { ...state, phase: Phase.PUSH };
-		return state;
-	}
-
-	ctx.ui.notify(`✅ Committed: "${commitMessage}"`, "info");
-	return { ...state, phase: Phase.PUSH };
-}
-
-async function handlePush(
-	ctx: ExtensionCommandContext,
-	state: WorkflowState,
-): Promise<WorkflowState> {
-	ctx.ui.notify("Pushing to remote...", "info");
-
-	const pushResult = await pi.exec("git", ["push"], { cwd: ctx.cwd, timeout: 30_000 });
-
-	if (pushResult.code !== 0) {
-		ctx.ui.notify(`git push failed: ${pushResult.stderr.slice(0, 300)}`, "error");
-		const skip = await ctx.ui.confirm("Push failed. Skip?", "You can push manually later.");
-		if (skip) return { ...state, phase: Phase.DONE };
-		return state; // Retry
-	}
-
-	ctx.ui.notify("✅ Changes pushed to remote!", "info");
-	return { ...state, phase: Phase.DONE };
-}
 
 // ── Extension entry point ────────────────────────────────────────────────────
 
@@ -993,57 +938,10 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 	});
 
 	// ── /godot-commit: Standalone git commit ──
-	pi.registerCommand("godot-commit", {
-		description: "Commit all staged changes",
-		handler: async (_args, ctx) => {
-			await ctx.waitForIdle();
-
-			ctx.ui.notify("Committing changes...", "info");
-
-			const addResult = await pi.exec("git", ["add", "-A"], { cwd: ctx.cwd, timeout: 10_000 });
-			if (addResult.code !== 0) {
-				ctx.ui.notify(`git add failed: ${addResult.stderr.slice(0, 200)}`, "error");
-				return;
-			}
-
-			const statusResult = await pi.exec("git", ["status", "--porcelain"], { cwd: ctx.cwd, timeout: 10_000 });
-			if (!statusResult.stdout.trim()) {
-				ctx.ui.notify("Nothing to commit — working tree clean.", "info");
-				return;
-			}
-
-			const commitResult = await pi.exec("git", ["commit", "-m", "godot: tweak"], {
-				cwd: ctx.cwd,
-				timeout: 10_000,
-			});
-
-			if (commitResult.code !== 0) {
-				ctx.ui.notify(`git commit failed: ${commitResult.stderr.slice(0, 200)}`, "error");
-				return;
-			}
-
-			ctx.ui.notify("✅ Committed.", "info");
-		},
-	});
+	registerCommitCommand(pi);
 
 	// ── /godot-push: Standalone git push ──
-	pi.registerCommand("godot-push", {
-		description: "Push to remote",
-		handler: async (_args, ctx) => {
-			await ctx.waitForIdle();
-
-			ctx.ui.notify("Pushing to remote...", "info");
-
-			const pushResult = await pi.exec("git", ["push"], { cwd: ctx.cwd, timeout: 30_000 });
-
-			if (pushResult.code !== 0) {
-				ctx.ui.notify(`git push failed: ${pushResult.stderr.slice(0, 300)}`, "error");
-				return;
-			}
-
-			ctx.ui.notify("✅ Pushed to remote!", "info");
-		},
-	});
+	registerPushCommand(pi);
 
 	// ── Persist on every turn end for crash recovery ──
 	pi.on("turn_end", (_event, ctx) => {
