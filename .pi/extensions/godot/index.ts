@@ -532,25 +532,48 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 		handler: async (_args, ctx) => {
 			await ctx.waitForIdle();
 
-			const state: WorkflowState = { ...DEFAULT_STATE, phase: Phase.QUESTIONS };
-
-			// Run questions and setup phases
-			const afterQuestions = await handleQuestions(ctx, state);
-			if (afterQuestions.phase === Phase.DONE) return;
-
-			persistState(pi, afterQuestions);
-
-			// If questions advanced past SETUP, run setup too
-			let currentState = afterQuestions;
-			if (currentState.phase === Phase.SETUP) {
-				currentState = await handleSetup(pi, ctx, currentState);
-				if (currentState.phase === Phase.DONE) return;
-				persistState(pi, currentState);
+			// Load existing state or start fresh
+			let state = loadState(ctx);
+			if (!state || state.phase === Phase.DONE) {
+				state = { ...DEFAULT_STATE, phase: Phase.QUESTIONS };
 			}
 
-			// Run the planning phase (combines GDD creation + review)
-			if (currentState.phase === Phase.PLAN) {
-				await handlePlanning(pi, ctx, currentState);
+			// eslint-disable-next-line no-constant-condition -- state machine loop
+			while (true) {
+				// Update status for PLAN phase
+				const label = PHASE_LABELS[state.phase as Phase] || state.phase;
+				ctx.ui.setStatus(
+					"godot-workflow",
+					ctx.ui.theme.fg("accent", `🎮 ${label}`),
+				);
+				ctx.ui.setWidget("godot-workflow", [
+					ctx.ui.theme.fg("accent", `🎮 Godot Plan — ${label}`),
+					ctx.ui.theme.fg("dim", `Game: ${state.gameName || state.gameType || "TBD"}`),
+				]);
+
+				switch (state.phase as Phase) {
+					case Phase.QUESTIONS:
+						state = await handleQuestions(ctx, state);
+						break;
+					case Phase.SETUP:
+						state = await handleSetup(pi, ctx, state);
+						break;
+					case Phase.PLAN:
+						state = await handlePlanning(pi, ctx, state);
+						// If planText is pending (prompt sent to LLM), return control for async response
+						if (state.planText === "pending") {
+							persistState(pi, state);
+							return;
+						}
+						break;
+					default:
+						ctx.ui.setStatus("godot-workflow", undefined);
+						ctx.ui.setWidget("godot-workflow", undefined);
+						persistState(pi, state);
+						return;
+				}
+
+				persistState(pi, state);
 			}
 		},
 	});

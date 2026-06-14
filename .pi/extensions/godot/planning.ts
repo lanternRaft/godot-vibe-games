@@ -44,7 +44,8 @@ interface WorkflowState {
  *
  * Flow:
  * 1. If GDD already exists on disk → read it, show editor for review/approval
- * 2. If prompt already sent (planText === "pending") → wait, tell user to continue
+ * 2. If prompt already sent (planText === "pending") → give user options to
+ *    check disk again, paste the LLM's chat response as the GDD, or re-send
  * 3. First time → send prompt to LLM to fill out the GDD template
  *
  * On approval, advances to IMPLEMENT. On revision, re-sends the prompt.
@@ -67,16 +68,78 @@ export async function handlePlanning(
 		return await handleReview(ctx, { ...state, planText: gddContent });
 	}
 
-	// If we already sent the prompt (planText === "pending"), just wait
+	// If we already sent the prompt (planText === "pending"), give actionable options
 	if (state.planText === "pending") {
-		ctx.ui.notify(
-			"⏳ Waiting for LLM to write the GDD to the game folder... Continue running /godot-generate when done.",
-			"info",
+		const action = await ctx.ui.select(
+			"⏳ The LLM was asked to write the GDD. What now?",
+			[
+				"Check disk again (LLM may have written the file)",
+				"Paste GDD from LLM's chat response",
+				"Re-send the GDD prompt",
+				"Stop workflow",
+			],
 		);
-		return { ...state, phase: Phase.PLAN };
+
+		switch (action) {
+			case "Check disk again (LLM may have written the file)": {
+				// Re-check if the LLM wrote the file since we last looked
+				const recheck = await pi.exec("test", ["-f", gddPath], { cwd: ctx.cwd });
+				if (recheck.code === 0) {
+					const readResult = await pi.exec("cat", [gddPath], { cwd: ctx.cwd });
+					const gddContent = readResult.code === 0 ? readResult.stdout : "(could not read GDD)";
+					ctx.ui.notify("GDD found on disk! Ready for review.", "info");
+					return await handleReview(ctx, { ...state, planText: gddContent });
+				}
+				ctx.ui.notify("GDD not yet written to disk. Try another option.", "warning");
+				// Fall through — re-prompt the user by returning to PLAN with pending still set
+				return { ...state, phase: Phase.PLAN };
+			}
+			case "Paste GDD from LLM's chat response": {
+				// The LLM responded in chat with the GDD content. Let the user paste it.
+				const gddText = await ctx.ui.editor(
+					"Paste the GDD content the LLM wrote in chat. You can also edit it here before saving.",
+					"",
+				);
+				if (gddText === undefined || !gddText.trim()) {
+					ctx.ui.notify("No GDD content provided. Returning to planning.", "warning");
+					return { ...state, phase: Phase.PLAN, planText: "pending" };
+				}
+				// Write the pasted content to disk
+				await pi.exec("bash", ["-c", `cat > "${gddPath}" << 'GDDEOF'
+${gddText}
+GDDEOF`], {
+					cwd: ctx.cwd,
+					timeout: 5_000,
+				});
+				ctx.ui.notify(`GDD saved to ${state.gameName}/GAME_DESIGN.md`, "info");
+				return await handleReview(ctx, { ...state, planText: gddText });
+			}
+			case "Re-send the GDD prompt": {
+				// Reset and re-send
+				return await sendGddPrompt(pi, ctx, { ...state, planText: "" });
+			}
+			default:
+				return { ...state, phase: Phase.DONE };
+		}
 	}
 
 	// First time entering PLAN — send prompt to LLM to fill the GDD
+	return await sendGddPrompt(pi, ctx, state);
+}
+
+// ── Internal prompt helper ──────────────────────────────────────────────────
+
+/**
+ * Read the template and send a prompt asking the LLM to write the GDD to disk.
+ * Uses the `write` tool (available to the pi agent) to save the file.
+ *
+ * @returns State with planText="pending".
+ */
+async function sendGddPrompt(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	state: WorkflowState,
+): Promise<WorkflowState> {
 	const templatePath = `${ctx.cwd}/template/GAME_DESIGN.md`;
 	let gddTemplate = "(template not found)";
 	try {
@@ -93,19 +156,18 @@ export async function handlePlanning(
 		"",
 		`Your task is to create a complete Game Design Document for a ${state.gameType} game.`,
 		"",
-		`**Game Folder:** \\\`${state.gameName}/\\\``,
+		`**Game Folder:** \`${state.gameName}/\``,
 		`**Scope:** ${state.scope}`,
 		`**Features:** ${state.features.join(", ")}`,
 		"",
-		`The template folder has already been copied to \\\`${state.gameName}/\\\`.`,
-		`A stub \\\`GAME_DESIGN.md\\\` template is at \\\`template/GAME_DESIGN.md\\\`.`,
+		`The template folder has already been copied to \`${state.gameName}/\`.`,
 		"",
 		"### Your Instructions",
 		"",
-		`1. **Read** the template at \\\`template/GAME_DESIGN.md\\\``,
-		`2. **Fill it out** by writing directly to \\\`${state.gameName}/GAME_DESIGN.md\\\` — replace every \\\`[placeholder]\\\` with concrete, specific details.`,
+		`1. **Read** the template at \`template/GAME_DESIGN.md\` in the project root.`,
+		`2. **Use the write tool to save the filled-out GDD to** \`${state.gameName}/GAME_DESIGN.md\` — replace every \`[placeholder]\` with concrete, specific details. Do NOT just respond in chat; write the file to disk using your write tool.`,
 		`3. **Ask clarifying questions** as you go — I'll answer them to help you make good design decisions for this ${state.gameType} game.`,
-		"4. Once the GDD is complete and you're satisfied with it, **tell me it's ready for review**.",
+		"4. Once the GDD is complete and you've written it to disk, **tell me it's ready for review**. Then I (or the user) will run the command again to pick up the file and proceed.",
 		"",
 		"",
 		"Here is the template:",
