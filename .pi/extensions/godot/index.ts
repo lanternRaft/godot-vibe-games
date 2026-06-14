@@ -18,10 +18,11 @@
  * State Machine Phases:
  *                                                                                │
  *                                                                                │
- *                                (REVIEW refines GDD) ◄──────────────────────────┘
+ *                      (PLAN handles creation + review) ◄────────────────────────┘
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { handlePlanning } from "./planning";
 import { handleValidationStep as validatePhaseHandler, registerValidationCommand } from "./validation";
 import { handleCommit, registerCommitCommand } from "./commit";
 import { handlePush, registerPushCommand } from "./push";
@@ -33,7 +34,6 @@ enum Phase {
 	QUESTIONS = "questions",
 	SETUP = "setup",
 	PLAN = "plan",
-	REVIEW = "review",
 	IMPLEMENT = "implement",
 	VALIDATE = "validate",
 	BUILD = "build",
@@ -49,8 +49,7 @@ interface WorkflowState {
 	gameName: string;
 	scope: string;
 	features: string[];
-	/** During PLAN: "pending" if prompt sent but GDD not yet written.
-	 *  During REVIEW: contains the full GDD text for editing. */
+	/** During PLAN: "pending" if prompt sent but GDD not yet written, or the full GDD text for editing. */
 	planText: string;
 	retryCount: number;
 	maxRetries: number;
@@ -72,8 +71,7 @@ const DEFAULT_STATE: WorkflowState = {
 const PHASE_LABELS: Record<Phase, string> = {
 	[Phase.QUESTIONS]: "Ask clarifying questions",
 	[Phase.SETUP]: "Copy template to game folder",
-	[Phase.PLAN]: "Fill out Game Design Document (interactive)",
-	[Phase.REVIEW]: "Review and approve Game Design Document",
+	[Phase.PLAN]: "Create and review Game Design Document",
 	[Phase.IMPLEMENT]: "Implement game from GDD",
 	[Phase.VALIDATE]: "Run validation (godot --headless --check-only --quiet)",
 	[Phase.BUILD]: "Run web build",
@@ -141,11 +139,10 @@ async function runWorkflow(
 				state = await handleSetup(pi, ctx, state);
 				break;
 			case Phase.PLAN:
-				state = await handlePlan(pi, ctx, state);
-				// After sending plan message, we return control — the LLM responds asynchronously
-				return;
-			case Phase.REVIEW:
-				state = await handleReview(ctx, state);
+				state = await handlePlanning(pi, ctx, state);
+				// If planText is pending (prompt sent to LLM), return control for async response
+				if (state.planText === "pending") return;
+				// Otherwise (review complete, transitioning to IMPLEMENT or back to PLAN), continue
 				break;
 			case Phase.IMPLEMENT:
 				state = await handleImplement(pi, ctx, state);
@@ -414,113 +411,6 @@ async function handleSetup(
 	return { ...state, phase: Phase.PLAN };
 }
 
-async function handlePlan(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-	state: WorkflowState,
-): Promise<WorkflowState> {
-	const gddPath = `${ctx.cwd}/${state.gameName}/GAME_DESIGN.md`;
-
-	// Check if GDD has already been written to the game folder
-	const gddExists = await pi.exec("test", ["-f", gddPath], { cwd: ctx.cwd });
-	if (gddExists.code === 0) {
-		// GDD exists — read it and advance to review
-		const readResult = await pi.exec("cat", [gddPath], { cwd: ctx.cwd });
-		const gddContent = readResult.code === 0 ? readResult.stdout : "(could not read GDD)";
-		ctx.ui.notify("GDD found in game folder! Ready for review.", "info");
-		return { ...state, phase: Phase.REVIEW, planText: gddContent };
-	}
-
-	// If we already sent the prompt (planText === "pending"), just wait
-	if (state.planText === "pending") {
-		ctx.ui.notify(
-			"⏳ Waiting for LLM to write the GDD to the game folder... Continue running /godot-generate when done.",
-			"info",
-		);
-		return { ...state, phase: Phase.PLAN };
-	}
-
-	// First time entering PLAN — send prompt to LLM to fill the GDD
-	const templatePath = `${ctx.cwd}/template/GAME_DESIGN.md`;
-	let gddTemplate = "(template not found)";
-	try {
-		const readResult = await pi.exec("cat", [templatePath], { cwd: ctx.cwd });
-		if (readResult.code === 0) {
-			gddTemplate = readResult.stdout;
-		}
-	} catch {
-		// fallback
-	}
-
-	const prompt = [
-		`## Game Design Document — ${state.gameName}`,
-		``,
-		`Your task is to create a complete Game Design Document for a ${state.gameType} game.`,
-		``,
-		`**Game Folder:** \\\`${state.gameName}/\\\``,
-		`**Scope:** ${state.scope}`,
-		`**Features:** ${state.features.join(", ")}`,
-		``,
-		`The template folder has already been copied to \\\`${state.gameName}/\\\`.`,
-		`A stub \\\`GAME_DESIGN.md\\\` template is at \\\`template/GAME_DESIGN.md\\\`.`,
-		``,
-		`### Your Instructions`,
-		``,
-		`1. **Read** the template at \\\`template/GAME_DESIGN.md\\\``,
-		`2. **Fill it out** by writing directly to \\\`${state.gameName}/GAME_DESIGN.md\\\` — replace every \\\`[placeholder]\\\` with concrete, specific details.`,
-		`3. **Ask clarifying questions** as you go — I'll answer them to help you make good design decisions for this ${state.gameType} game.`,
-		`4. Once the GDD is complete and you're satisfied with it, **tell me it's ready for review**.`,
-		``,
-		``,
-		`Here is the template:`,
-		``,
-		"```",
-		gddTemplate,
-		"```",
-	].join("\n");
-
-	ctx.ui.notify("Asking LLM to fill out the Game Design Document...", "info");
-	pi.sendUserMessage(prompt);
-
-	// Stay in PLAN phase — mark that we've sent the prompt
-	return { ...state, phase: Phase.PLAN, planText: "pending" };
-}
-
-async function handleReview(
-	ctx: ExtensionCommandContext,
-	state: WorkflowState,
-): Promise<WorkflowState> {
-	// Show the GDD to the user for editing/approval
-	const gdd = await ctx.ui.editor(
-		"Review the Game Design Document. Edit if needed, or submit as-is to approve.",
-		state.planText,
-	);
-	if (gdd === undefined) {
-		// User cancelled
-		const action = await ctx.ui.select("Cancel workflow?", ["Go back", "Stop workflow"]);
-		if (action === "Stop workflow") return { ...state, phase: Phase.DONE };
-		return state;
-	}
-
-	state = { ...state, planText: gdd };
-
-	const choice = await ctx.ui.select("What next?", [
-		"GDD looks good — implement the game!",
-		"Revise GDD (back to interactive planning)",
-		"Cancel workflow",
-	]);
-
-	switch (choice) {
-		case "GDD looks good — implement the game!":
-			return { ...state, phase: Phase.IMPLEMENT };
-		case "Revise GDD (back to interactive planning)":
-			// Reset planText so PLAN phase re-sends the prompt
-			return { ...state, phase: Phase.PLAN, planText: "" };
-		default:
-			return { ...state, phase: Phase.DONE };
-	}
-}
-
 async function handleImplement(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
@@ -658,9 +548,9 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 				persistState(pi, currentState);
 			}
 
-			// Send the GDD prompt to LLM
+			// Run the planning phase (combines GDD creation + review)
 			if (currentState.phase === Phase.PLAN) {
-				await handlePlan(pi, ctx, currentState);
+				await handlePlanning(pi, ctx, currentState);
 			}
 		},
 	});
