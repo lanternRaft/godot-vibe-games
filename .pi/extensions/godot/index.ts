@@ -12,14 +12,11 @@
  *   /godot-tweak            - Quick tweak: pick game → describe change → implement → pipeline
  *   /godot-validate [game]  - Run Godot validation on a game folder
  *   /godot-build [game]     - Run web build for a game folder
- *   /godot-verify [game]    - Verify a completed build
  *   /godot-commit           - Commit all staged changes
  *   /godot-push             - Push to remote
  *
  * State Machine Phases:
- *   QUESTIONS  →  SETUP  →  PLAN (interactive GDD)  →  REVIEW  →  IMPLEMENT  →  VALIDATE  →  BUILD  →  VERIFY  →  COMMIT  →  PUSH  →  DONE
  *                                                                                │
- *                                (VERIFY fails) ◄────────────────────────────────┘
  *                                                                                │
  *                                (REVIEW refines GDD) ◄──────────────────────────┘
  */
@@ -40,7 +37,6 @@ enum Phase {
 	IMPLEMENT = "implement",
 	VALIDATE = "validate",
 	BUILD = "build",
-	VERIFY = "verify",
 	COMMIT = "commit",
 	PUSH = "push",
 	DONE = "done",
@@ -81,7 +77,6 @@ const PHASE_LABELS: Record<Phase, string> = {
 	[Phase.IMPLEMENT]: "Implement game from GDD",
 	[Phase.VALIDATE]: "Run validation (godot --headless --check-only --quiet)",
 	[Phase.BUILD]: "Run web build",
-	[Phase.VERIFY]: "Verify build succeeded",
 	[Phase.COMMIT]: "Commit changes",
 	[Phase.PUSH]: "Push to remote",
 	[Phase.DONE]: "Complete",
@@ -161,9 +156,6 @@ async function runWorkflow(
 				break;
 			case Phase.BUILD:
 				state = await handleBuild(ctx, state);
-				break;
-			case Phase.VERIFY:
-				state = await handleVerify(ctx, state);
 				break;
 			case Phase.COMMIT:
 				state = await handleCommit(pi, ctx, state);
@@ -561,8 +553,9 @@ async function handleImplement(
 		`3. **Follow the GDD exactly** — match the controls, mechanics, entities, and UI described there.`,
 		``,
 	].join("\n");
+	await ctx.sessionManager.newSession();
 
-	ctx.ui.notify("Asking LLM to implement the game from the GDD...", "info");
+	ctx.ui.notify("Context cleared. Now implementing the game from the GDD", "info");
 	pi.sendUserMessage(prompt);
 
 	// Advance to VALIDATE phase — LLM will respond asynchronously
@@ -609,55 +602,8 @@ async function handleBuild(
 	}
 
 	ctx.ui.notify("✅ Web build completed!", "info");
-	return { ...state, phase: Phase.VERIFY };
+	return { ...state, phase: Phase.COMMIT };
 }
-
-async function handleVerify(
-	ctx: ExtensionCommandContext,
-	state: WorkflowState,
-): Promise<WorkflowState> {
-	const ok = await ctx.ui.confirm(
-		"Build successful — does it look good?",
-		"Check the output. If you need fixes, we'll go back to implementation.",
-	);
-
-	if (ok) {
-		return { ...state, phase: Phase.COMMIT };
-	}
-
-	// Build not satisfactory — loop back to implement
-	state.retryCount++;
-	if (state.retryCount > state.maxRetries) {
-		ctx.ui.notify("Max retries exceeded. Stopping workflow.", "error");
-		return { ...state, phase: Phase.DONE };
-	}
-
-	const feedback = await ctx.ui.input(
-		"What needs to be fixed? Describe the issue(s):",
-		"",
-	);
-	if (feedback === undefined) return { ...state, phase: Phase.DONE };
-
-	// Send feedback to LLM referencing the GDD
-	const prompt = [
-		`## Fix Issues — ${state.gameName}`,
-		``,
-		`The previous build had issues that need fixing. Continue implementing from the GDD.`,
-		``,
-		`**Game folder:** \\\`${state.gameName}/\\\``,
-		`**GDD:** \\\`${state.gameName}/GAME_DESIGN.md\\\` (on disk — re-read it for full design details)`,
-		``,
-		`**Feedback:** ${feedback}`,
-		``,
-		`Fix the issues above, then validate with \\\`godot --headless --check-only --quit --quiet\\\`.`,
-	].join("\n");
-
-	ctx.ui.notify("Sending feedback to LLM for fixes...", "info");
-	pi.sendUserMessage(prompt);
-
-	return { ...state, phase: Phase.VALIDATE };
-}
-
 
 
 // ── Extension entry point ────────────────────────────────────────────────────
@@ -821,7 +767,7 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 
 	// ── /godot-tweak: Quick tweak pipeline ──
 	pi.registerCommand("godot-tweak", {
-		description: "Quick tweak: pick a game, describe the change, then run validate → build → verify → commit → push",
+		description: "Quick tweak: pick a game, describe the change, then run validate → build → commit → push",
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 
@@ -915,25 +861,6 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 			}
 
 			ctx.ui.notify(`✅ "${gameFolder}" web build completed!`, "info");
-		},
-	});
-
-	// ── /godot-verify: Standalone build verification ──
-	pi.registerCommand("godot-verify", {
-		description: "Verify a completed build looks good",
-		handler: async (_args, ctx) => {
-			await ctx.waitForIdle();
-
-			const ok = await ctx.ui.confirm(
-				"Build verification",
-				"Does the build output look good? If not, describe what needs fixing.",
-			);
-
-			if (ok) {
-				ctx.ui.notify("✅ Build verified!", "info");
-			} else {
-				ctx.ui.notify("Build needs fixes. Use /godot-tweak to describe changes.", "info");
-			}
 		},
 	});
 
