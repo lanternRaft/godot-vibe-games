@@ -197,11 +197,6 @@ async function runValidation(
 		{ cwd: ctx.cwd, timeout: 120_000 },
 	);
 
-	ctx.ui.notify("WHATT!!!", "error");
-	ctx.ui.notify(result.code, "error");
-
-	ctx.ui.notify(result.stderr, "error");
-	ctx.ui.notify(result.stdout, "error");
 	const stderr = result.stderr
 		.split("\n")
 		.filter((l) => !l.includes("ObjectDB instances leaked at exit"))
@@ -631,7 +626,7 @@ async function handleValidate(
 		}
 	}
 
-	ctx.ui.notify("✅ Validation passed!", "info");
+	ctx.ui.notify("✅ Validation passed!", "success");
 	return { ...state, phase: Phase.BUILD };
 }
 
@@ -1027,7 +1022,7 @@ export default function godotWorkflowExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
-			ctx.ui.notify(`✅ "${gameFolder}" validation passed!`, "info");
+			ctx.ui.notify(`✅ "${gameFolder}" validation passed!`, "success");
 		},
 	});
 
